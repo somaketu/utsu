@@ -15,8 +15,6 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.0",
-    "langchain-groq",
-    "langchain-core",
     "requests",
     "pyyaml"
 ]
@@ -26,6 +24,6 @@ dependencies = [
 utsu = "utsu.cli.main:main"
 
 [tool.maturin]
-manifest-path = "src-rust/Cargo.toml"   # <-- ADD THIS LINE
+manifest-path = "src-rust/Cargo.toml"
 module-name = "utsu.utsu_rust_core"
 features = ["pyo3/extension-module"]
