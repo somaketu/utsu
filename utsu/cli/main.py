@@ -1,5 +1,4 @@
 import argparse
-import logging
 import sys
 import os
 import time
@@ -10,6 +9,8 @@ from utsu.plugins.subdomain.recon import ReconEngine
 from utsu.probing.client import LiveProber
 from utsu.plugins.js_analysis.analyzer import JSAnalyzer
 from utsu.core.reporting import ReportManager
+from utsu.intelligence.diff import StateEngine
+from utsu.core.logger import log
 
 try:
     from utsu import utsu_rust_core
@@ -17,16 +18,14 @@ try:
 except ImportError:
     RUST_CORE_ACTIVE = False
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
 def initialize_profile(profile_path: str):
     cfg = ConfigManager()
     cfg.load_profile(profile_path)
 
 def cmd_scan(args):
     if not RUST_CORE_ACTIVE:
-        print("\n[-] FATAL: Native Rust core (utsu_rust_core) is not installed or failed to load.")
-        print("[-] Please run ./install.sh to compile the extraction engine.")
+        log.error("FATAL: Native Rust core (utsu_rust_core) is not installed or failed to load.")
+        log.error("Please run ./install.sh to compile the extraction engine.")
         sys.exit(1)
 
     initialize_profile(args.profile)
@@ -34,57 +33,34 @@ def cmd_scan(args):
     target_domain = args.target
 
     if args.force:
-        logging.info(f"[*] --force flag detected. Wiping operational database at {cfg.db_path}...")
+        log.info(f"--force flag detected. Wiping operational database at {cfg.db_path}...")
         if os.path.exists(cfg.db_path):
             os.remove(cfg.db_path)
             
     db = DeltaDB(cfg.db_path)
-    domain_id = db.add_domain(target_domain)
     
-    print(f"\n[*] Target: {target_domain} (ID: {domain_id})")
-    print("[*] Phase 1: Gathering passive intelligence...")
+    log.info(f"Target: {target_domain}")
+    log.info("Phase 1: Gathering passive intelligence...")
 
     engine = ReconEngine(target_domain)
     discovered_assets = engine.run_all()
     discovered_assets.add(target_domain)
 
-    print("\n[*] Phase 2: Evaluating Deltas (Bulk Processing)...")
-    new_assets_to_probe = {}
+    log.info("Phase 2: Evaluating Deltas via State Engine...")
+    
+    # Inject the new Diff Engine
+    state_engine = StateEngine(db)
+    state_data = state_engine.process_subdomains(target_domain, discovered_assets)
+    new_assets_to_probe = state_data["new_subs_map"]
 
-    with db._get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, subdomain FROM subdomains WHERE domain_id = ?', (domain_id,))
-        existing_assets = {row[1]: row[0] for row in cursor.fetchall()}
-        
-        new_subs = discovered_assets - existing_assets.keys()
-        subs_to_update = discovered_assets.intersection(existing_assets.keys())
-
-        if new_subs:
-            cursor.executemany(
-                'INSERT INTO subdomains (domain_id, subdomain) VALUES (?, ?)', 
-                [(domain_id, sub) for sub in new_subs]
-            )
-            cursor.execute('SELECT id, subdomain FROM subdomains WHERE domain_id = ?', (domain_id,))
-            updated_assets = {row[1]: row[0] for row in cursor.fetchall()}
-            
-            for sub in new_subs:
-                new_assets_to_probe[updated_assets[sub]] = sub
-                print(f"[+] NEW DELTA: {sub}")
-
-        if subs_to_update:
-            cursor.executemany(
-                'UPDATE subdomains SET last_seen = CURRENT_TIMESTAMP WHERE id = ?', 
-                [(existing_assets[sub],) for sub in subs_to_update]
-            )
-
-    print(f"\n[+] Found {len(new_assets_to_probe)} assets targeting execution queue.")
+    log.info(f"Found {len(new_assets_to_probe)} net-new assets targeting execution queue.")
 
     if new_assets_to_probe:
-        print("\n[*] Phase 3: Launching Live Prober on Targets...")
+        log.info("Phase 3: Launching Live Prober on Targets...")
         prober = LiveProber(threads=cfg.prober_threads, rps=cfg.rate_limit_rps, custom_headers=cfg.custom_headers)
         live_services = prober.run(new_assets_to_probe)
 
-        print("\n[*] Phase 4: Committing verified web services & extracting JS Intel...")
+        log.info("Phase 4: Committing verified web services & extracting JS Intel...")
         live_urls = []
         for service in live_services:
             live_urls.append(service["url"])
@@ -98,10 +74,10 @@ def cmd_scan(args):
             
             service_id = db.get_web_service_id_by_url(service["url"])
             if not service_id:
-                logging.error(f"[!] Could not retrieve service ID for {service['url']} — skipping JS analysis")
+                log.error(f"Could not retrieve service ID for {service['url']} — skipping JS analysis")
                 continue
                 
-            print(f"    └── Parsing scripts on {service['url']}...")
+            log.info(f"    └── Parsing scripts on {service['url']}...")
             
             analyzer = JSAnalyzer(service["url"], custom_headers=cfg.custom_headers)
             intel = analyzer.analyze()
@@ -111,7 +87,7 @@ def cmd_scan(args):
                     db.add_endpoint(web_service_id=service_id, path=path, source="js_analyzer")
 
             if intel["secrets"]:
-                print(f"        [!] CRITICAL: Found {len(intel['secrets'])} potential hardcoded credentials!")
+                log.warning(f"        [!] CRITICAL: Found {len(intel['secrets'])} potential hardcoded credentials!")
                 for secret in intel["secrets"]:
                     db.add_secret(web_service_id=service_id, secret_type=secret["type"], value=secret["value"], location=secret["location"])
 
@@ -120,10 +96,10 @@ def cmd_scan(args):
         reporter = ReportManager()
         target_file = reporter.save_scan_targets(target_domain, live_urls)
         
-        print(f"\n[+] Processing complete. Attack surface data fully structured inside {cfg.db_path}")
-        print(f"[+] Flat target list exported to: {target_file}")
+        log.info(f"Processing complete. Attack surface data fully structured inside {cfg.db_path}")
+        log.info(f"Flat target list exported to: {target_file}")
     else:
-        print("\n[*] No new assets require probing or static code analysis.")
+        log.info("No new assets require probing or static code analysis.")
 
 def cmd_triage(args):
     initialize_profile(args.profile)
@@ -143,12 +119,12 @@ def cmd_triage(args):
         cursor.execute('SELECT id, url FROM web_services WHERE url LIKE ?', (f"%{target}%",))
         result = cursor.fetchone()
         if not result:
-            logging.error(f"[-] Target '{target}' not found in database.")
+            log.error(f"Target '{target}' not found in database.")
             return
 
     ws_id, exact_url = result[0], result[1]
     
-    print(f"\n[*] Initiating AI Triage for target: {exact_url}...")
+    log.info(f"Initiating Local AI Triage for target: {exact_url}...")
     agent = TriageAgent()
     reporter = ReportManager()
     
@@ -156,7 +132,7 @@ def cmd_triage(args):
     if report:
         print(f"\n{report}")
         reporter.save_triage_report(exact_url, report)
-        print(f"[+] Output appended to {reporter.master_hunt_log}")
+        log.info(f"Output appended to {reporter.master_hunt_log}")
 
 def cmd_hunt(args):
     initialize_profile(args.profile)
@@ -185,33 +161,28 @@ def cmd_hunt(args):
         viable_targets = cursor.fetchall()
 
     if not viable_targets:
-        print("[-] No viable targets with extracted intelligence found for hunting.")
+        log.info("No viable targets with extracted intelligence found for hunting.")
         return
 
-    print(f"\n[*] Hunt Execution Started. {len(viable_targets)} viable targets in AI queue.")
+    log.info(f"Hunt Execution Started. {len(viable_targets)} viable targets in local AI queue.")
     agent = TriageAgent()
     
     for index, (ws_id, exact_url) in enumerate(viable_targets, 1):
-        print(f"\n[{index}/{len(viable_targets)}] Processing {exact_url} through LangGraph pipeline...")
+        log.info(f"[{index}/{len(viable_targets)}] Processing {exact_url} through local Ollama engine...")
         try:
             report = agent.run(web_service_id=ws_id, url=exact_url, scope_rules=scope_rules)
             if report:
-                print(f"{report}")
+                print(f"\n{report}\n")
                 reporter.save_triage_report(exact_url, report)
             
-            time.sleep(2.5)
+            # Reduced sleep time. Local AI handles pacing; no third-party rate limits apply.
+            time.sleep(1) 
             
-        except RuntimeError as e:
-            if "GROQ_RATE_LIMIT" in str(e):
-                print(f"\n[!] CRITICAL: API Rate Limit exhausted. Halting execution to preserve target queue.")
-                print(f"[+] All completed reports saved securely in {reporter.master_hunt_log}")
-                break
-            print(f"    └── [!] Triage failed on {exact_url}: {e}")
         except Exception as e:
-            print(f"    └── [!] Triage failed on {exact_url}: {e}")
+            log.error(f"    └── [!] Triage failed on {exact_url}: {e}")
             continue
             
-    print(f"\n[+] Hunt phase complete. Review your findings in {reporter.master_hunt_log}")
+    log.info(f"Hunt phase complete. Review your findings in {reporter.master_hunt_log}")
 
 def main():
     parser = argparse.ArgumentParser(description="Asymmetric Attack Surface Management Framework")
@@ -236,14 +207,14 @@ def main():
     try:
         args.func(args)
     except ValueError as e:
-        print(f"\n[-] CONFIGURATION ERROR: {e}")
+        log.error(f"CONFIGURATION ERROR: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
         print("\n[!] Execution interrupted by user. Exiting cleanly.")
         sys.exit(0)
     except Exception as e:
-        print(f"\n[-] UNEXPECTED FATAL ERROR: {e}")
-        print("    Please ensure your environment is configured correctly.")
+        log.error(f"UNEXPECTED FATAL ERROR: {e}", exc_info=True)
+        log.error("Please ensure your environment is configured correctly.")
         sys.exit(1)
 
 if __name__ == "__main__":
