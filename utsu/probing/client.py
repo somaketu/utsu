@@ -1,4 +1,3 @@
-import logging
 import requests
 import urllib3
 import socket
@@ -9,6 +8,7 @@ from urllib.parse import urlparse
 from threading import Semaphore
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List
+from utsu.core.logger import log
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -44,6 +44,7 @@ class LiveProber:
                 ip_obj = ipaddress.ip_address(ip_str)
                 
                 if not ip_obj.is_global:
+                    log.debug(f"Skipping local/private IP for {url}: {ip_str}")
                     continue
                 
                 ip_url = url.replace(hostname, ip_str)
@@ -53,8 +54,8 @@ class LiveProber:
                 if "<title>" in response.text.lower():
                     try:
                         title = response.text.split("<title>")[1].split("</title>")[0][:50]
-                    except IndexError:
-                        pass
+                    except IndexError as e:
+                        log.debug(f"Failed to parse title on {url}: {str(e)}")
 
                 return {
                     "subdomain_id": subdomain_id,
@@ -64,7 +65,20 @@ class LiveProber:
                     "title": title.strip()
                 }
 
-            except (requests.exceptions.RequestException, socket.gaierror, ValueError):
+            except socket.gaierror:
+                log.debug(f"DNS resolution failed for {hostname}")
+                continue
+            except requests.exceptions.Timeout:
+                log.debug(f"Connection timeout probing {url}")
+                continue
+            except requests.exceptions.RequestException as e:
+                log.debug(f"Request failed for {url}: {str(e)}")
+                continue
+            except ValueError as e:
+                log.debug(f"Value error probing {url}: {str(e)}")
+                continue
+            except Exception as e:
+                log.debug(f"Unexpected error probing {url}: {str(e)}", exc_info=True)
                 continue
         return {}
 
