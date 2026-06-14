@@ -7,7 +7,6 @@ on:
     branches: [ main ]
 
 env:
-  # Silence the GitHub runner deprecation warning
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -24,17 +23,21 @@ jobs:
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@stable
         
-    - name: Install dependencies
+    - name: Build Environment & Core
       run: |
+        python -m venv .venv
+        source .venv/bin/activate
         pip install --upgrade pip
         pip install maturin pytest
-        pip install -e .
         
-    - name: Build Rust Core
-      run: |
+        # Compile Rust Core
         export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
         maturin develop --release -m src-rust/Cargo.toml
         
+        # Install the UTSU framework dependencies
+        pip install -e .
+        
     - name: Run Test Suite
       run: |
+        source .venv/bin/activate
         pytest tests/ -v
