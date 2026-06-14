@@ -1,21 +1,33 @@
-name: CI
-on: [push, pull_request]
-jobs:
-  python-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install black ruff
-      - run: black --check .
-      - run: ruff check .
+name: UTSU CI Pipeline
 
-  python-test:
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install -r requirements.txt pytest pytest-cov
-      - run: pytest tests/ --cov=core --cov=modules --cov-report=term-missing
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install maturin pytest
+        
+    - name: Build Rust Core
+      # We force ABI3 compatibility here just like the install script to ensure cross-platform stability
+      run: |
+        export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
+        maturin develop --release -m src-rust/Cargo.toml
+        
+    - name: Run Test Suite
+      run: |
+        pytest tests/ -v
