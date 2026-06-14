@@ -40,14 +40,18 @@ class StateEngine:
                     [(domain_id, sub) for sub in unchanged_subs]
                 )
             
-            # 3. Retrieve the database IDs for the newly inserted subdomains
-            # The LiveProber requires a dictionary of {id: subdomain} to map results later
+            # 3. Retrieve the database IDs for the newly inserted subdomains in safe chunks
             new_sub_ids = {}
             if new_subs:
-                placeholders = ','.join(['?'] * len(new_subs))
-                query = f"SELECT id, subdomain FROM subdomains WHERE domain_id = ? AND subdomain IN ({placeholders})"
-                cursor.execute(query, [domain_id] + list(new_subs))
-                new_sub_ids = {row[1]: row[0] for row in cursor.fetchall()}
+                new_subs_list = list(new_subs)
+                chunk_size = 900  # Stays safely below SQLite's strict variable cap
+                
+                for i in range(0, len(new_subs_list), chunk_size):
+                    chunk = new_subs_list[i:i + chunk_size]
+                    placeholders = ','.join(['?'] * len(chunk))
+                    query = f"SELECT id, subdomain FROM subdomains WHERE domain_id = ? AND subdomain IN ({placeholders})"
+                    cursor.execute(query, [domain_id] + chunk)
+                    new_sub_ids.update({row[1]: row[0] for row in cursor.fetchall()})
             
         log.info(
             f"[State Engine] Diff complete for {domain} | "
@@ -58,7 +62,7 @@ class StateEngine:
         
         return {
             "new_subs_list": new_subs,
-            "new_subs_map": new_sub_ids, # Pass this directly to LiveProber
+            "new_subs_map": new_sub_ids, 
             "dead_subs": dead_subs,
             "unchanged_subs": unchanged_subs
         }
