@@ -13,7 +13,7 @@ from utsu.intelligence.diff import StateEngine
 from utsu.core.logger import log
 
 try:
-    from utsu import utsu_rust_core
+    from utsu import utsu_rust_core  # type: ignore
     RUST_CORE_ACTIVE = True
 except ImportError:
     RUST_CORE_ACTIVE = False

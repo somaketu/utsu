@@ -7,19 +7,21 @@ import sys
 from urllib.parse import urlparse
 from threading import Semaphore
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List
+from typing import Dict, List, Optional, Any
 from utsu.core.logger import log
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class LiveProber:
-    def __init__(self, threads: int = 10, rps: int = 10, custom_headers: Dict[str, str] = None):
+    def __init__(self, threads: int = 10, rps: int = 10, custom_headers: Optional[Dict[str, str]] = None):
         self.threads = threads
         self.rps = rps
         self._rate_semaphore = Semaphore(self.rps)
         self._last_request_time = 0.0
         self.timeout = 7
-        self.custom_headers = custom_headers or {
+        
+        # Safely handle the Optional dictionary
+        self.custom_headers: Dict[str, str] = custom_headers if custom_headers is not None else {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
 
@@ -34,11 +36,17 @@ class LiveProber:
             headers["Host"] = host_header
             return requests.get(url, headers=headers, verify=False, timeout=self.timeout, allow_redirects=True)
 
-    def _probe_single(self, subdomain_id: int, subdomain: str) -> Dict:
+    def _probe_single(self, subdomain_id: int, subdomain: str) -> Dict[str, Any]:
         for scheme in ["https", "http"]:
             url = f"{scheme}://{subdomain}"
             try:
                 hostname = urlparse(url).hostname
+                
+                # Guardrail: Prevent TypeError if urlparse fails on malformed input
+                if not hostname:
+                    log.debug(f"Could not parse valid hostname from URL: {url}")
+                    continue
+
                 # This is the blocking DNS call causing the delay on dead domains
                 ip_str = socket.gethostbyname(hostname)
                 ip_obj = ipaddress.ip_address(ip_str)
@@ -53,8 +61,10 @@ class LiveProber:
                 title = ""
                 if "<title>" in response.text.lower():
                     try:
-                        title = response.text.split("<title>")[1].split("</title>")[0][:50]
-                    except IndexError as e:
+                        title_split = response.text.lower().split("<title>")
+                        if len(title_split) > 1:
+                            title = title_split[1].split("</title>")[0][:50]
+                    except Exception as e:
                         log.debug(f"Failed to parse title on {url}: {str(e)}")
 
                 return {
@@ -66,7 +76,7 @@ class LiveProber:
                 }
 
             except socket.gaierror:
-                log.debug(f"DNS resolution failed for {hostname}")
+                log.debug(f"DNS resolution failed for {hostname if 'hostname' in locals() and hostname else url}")
                 continue
             except requests.exceptions.Timeout:
                 log.debug(f"Connection timeout probing {url}")
@@ -82,12 +92,11 @@ class LiveProber:
                 continue
         return {}
 
-    def run(self, targets: Dict[int, str]) -> List[Dict]:
+    def run(self, targets: Dict[int, str]) -> List[Dict[str, Any]]:
         live_services = []
         total = len(targets)
         completed = 0
         
-        # Clear the line and setup the telemetry display
         sys.stdout.write(f"\r[*] Initializing concurrent probe across {total} targets...\n")
         
         with ThreadPoolExecutor(max_workers=self.threads) as executor:
@@ -99,9 +108,8 @@ class LiveProber:
                 if result:
                     live_services.append(result)
                 
-                # Dynamic terminal output (overwrites the same line)
                 sys.stdout.write(f"\r    ├── Progress: [{completed}/{total}] | Live Targets Discovered: {len(live_services)}")
                 sys.stdout.flush()
                 
-        print() # Drop to a new line when finished
+        print()
         return live_services
