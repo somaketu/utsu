@@ -8,6 +8,7 @@ from utsu.ai.pipeline import TriageAgent
 from utsu.plugins.subdomain.recon import ReconEngine
 from utsu.probing.client import LiveProber
 from utsu.plugins.js_analysis.analyzer import JSAnalyzer
+from utsu.plugins.crawling.crawler import DeepCrawler
 from utsu.core.reporting import ReportManager
 from utsu.intelligence.diff import StateEngine
 from utsu.core.logger import log
@@ -48,7 +49,6 @@ def cmd_scan(args):
 
     log.info("Phase 2: Evaluating Deltas via State Engine...")
     
-    # Inject the new Diff Engine
     state_engine = StateEngine(db)
     state_data = state_engine.process_subdomains(target_domain, discovered_assets)
     new_assets_to_probe = state_data["new_subs_map"]
@@ -60,8 +60,10 @@ def cmd_scan(args):
         prober = LiveProber(threads=cfg.prober_threads, rps=cfg.rate_limit_rps, custom_headers=cfg.custom_headers)
         live_services = prober.run(new_assets_to_probe)
 
-        log.info("Phase 4: Committing verified web services & extracting JS Intel...")
+        log.info("Phase 4: Committing verified web services to State Engine...")
         live_urls = []
+        crawler_targets = []
+        
         for service in live_services:
             live_urls.append(service["url"])
             db.add_web_service(
@@ -73,25 +75,36 @@ def cmd_scan(args):
             )
             
             service_id = db.get_web_service_id_by_url(service["url"])
-            if not service_id:
-                log.error(f"Could not retrieve service ID for {service['url']} — skipping JS analysis")
-                continue
-                
-            log.info(f"    └── Parsing scripts on {service['url']}...")
+            if service_id:
+                crawler_targets.append({"ws_id": service_id, "url": service["url"]})
+                db.mark_scanned(service["subdomain_id"])
+
+        if crawler_targets:
+            log.info("Phase 5: Engaging Rust Engine for Deep DOM Extraction...")
+            crawler = DeepCrawler(db, threads=cfg.prober_threads, max_depth=1)
+            crawler.run(crawler_targets)
+
+            log.info("Phase 6: Executing Static Code Analysis (JS Secrets)...")
+            sys.stdout.write(f"[*] Parsing scripts across {len(crawler_targets)} targets...\n")
+            completed = 0
             
-            analyzer = JSAnalyzer(service["url"], custom_headers=cfg.custom_headers)
-            intel = analyzer.analyze()
+            for target in crawler_targets:
+                completed += 1
+                analyzer = JSAnalyzer(target["url"], custom_headers=cfg.custom_headers)
+                intel = analyzer.analyze()
 
-            if intel["paths"]:
-                for path in intel["paths"]:
-                    db.add_endpoint(web_service_id=service_id, path=path, source="js_analyzer")
+                if intel["paths"]:
+                    for path in intel["paths"]:
+                        db.add_endpoint(web_service_id=target["ws_id"], path=path, source="js_analyzer")
 
-            if intel["secrets"]:
-                log.warning(f"        [!] CRITICAL: Found {len(intel['secrets'])} potential hardcoded credentials!")
-                for secret in intel["secrets"]:
-                    db.add_secret(web_service_id=service_id, secret_type=secret["type"], value=secret["value"], location=secret["location"])
-
-            db.mark_scanned(service["subdomain_id"])
+                if intel["secrets"]:
+                    log.warning(f"\n[!] CRITICAL: Found {len(intel['secrets'])} potential credentials on {target['url']}!")
+                    for secret in intel["secrets"]:
+                        db.add_secret(web_service_id=target["ws_id"], secret_type=secret["type"], value=secret["value"], location=secret["location"])
+                
+                sys.stdout.write(f"\r    ├── Analysis Progress: [{completed}/{len(crawler_targets)}]")
+                sys.stdout.flush()
+            print()
             
         reporter = ReportManager()
         target_file = reporter.save_scan_targets(target_domain, live_urls)
@@ -175,7 +188,6 @@ def cmd_hunt(args):
                 print(f"\n{report}\n")
                 reporter.save_triage_report(exact_url, report)
             
-            # Reduced sleep time. Local AI handles pacing; no third-party rate limits apply.
             time.sleep(1) 
             
         except Exception as e:
