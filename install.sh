@@ -17,26 +17,27 @@ if ! command -v python3 &> /dev/null; then
 fi
 
 # 2. Virtual Environment Sandboxing
+echo "[*] Cleaning previous state..."
+rm -rf venv
+
 echo "[*] Creating isolated Python environment..."
 python3 -m venv venv
 source venv/bin/activate
 
 # 3. Build Tooling
 echo "[*] Installing build orchestration..."
-pip install --upgrade pip setuptools wheel --quiet
-pip install maturin --quiet
+pip install --upgrade pip setuptools wheel maturin --quiet
 
-# 4. Hybrid Compilation (Silently handling the PyO3 ABI mismatch)
-echo "[*] Compiling high-speed Rust core..."
-export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
-maturin develop --release -m src-rust/Cargo.toml
+# 4. Production Compilation
+echo "[*] Compiling high-speed Rust core (Release Mode)..."
+# We use standard pip installation. Maturin acts as the backend automatically.
+pip install . --no-cache-dir
 
 # 5. Global Command Wiring
 echo "[*] Wiring global command..."
 mkdir -p ~/.local/bin
 REPO_DIR=$(pwd)
 
-# Create an executable wrapper that automatically activates the venv
 cat << EOF > ~/.local/bin/utsu
 #!/usr/bin/env bash
 source "${REPO_DIR}/venv/bin/activate"

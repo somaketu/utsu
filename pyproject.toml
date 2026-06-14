@@ -16,6 +16,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.0",
     "requests",
+    "urllib3",
     "pyyaml"
 ]
 
@@ -26,4 +27,7 @@ utsu = "utsu.cli.main:main"
 [tool.maturin]
 manifest-path = "src-rust/Cargo.toml"
 module-name = "utsu.utsu_rust_core"
-features = ["pyo3/extension-module"]
+# This tells maturin to use the stable ABI when building wheels
+features = ["pyo3/extension-module", "pyo3/abi3"]
+# This ensures it doesn't try to link to the specific version of Python that built it
+compatibility = "off"
