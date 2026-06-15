@@ -1,9 +1,8 @@
 import sqlite3
-from typing import Iterator
 import logging
 import os
 import stat
-from typing import List, Tuple, Optional
+from typing import Iterator, List, Tuple, Optional, Dict
 from contextlib import contextmanager
 from utsu.core.encryption import Vault
 
@@ -175,3 +174,40 @@ class DeltaDB:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('UPDATE subdomains SET is_scanned = 1 WHERE id = ?', (subdomain_id,))
+
+    def get_endpoints_by_service(self, web_service_id: int) -> List[str]:
+        """Abstracts endpoint retrieval. Callers don't know this is SQLite."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT path FROM endpoints WHERE web_service_id = ?", (web_service_id,))
+                return [row[0] for row in cursor.fetchall()]
+        except Exception as e:
+            logging.error(f"Failed to fetch endpoints for service {web_service_id}: {e}")
+            return []
+
+    def get_encrypted_secrets_by_service(self, web_service_id: int) -> List[Dict[str, str]]:
+        """
+        Retrieves encrypted secrets and automatically decrypts them using the Vault,
+        returning a clean, uniform data structure to the application layer.
+        """
+        try:
+            vault = Vault()
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT type, encrypted_value, location FROM leaked_secrets WHERE web_service_id = ?", (web_service_id,))
+                rows = cursor.fetchall()
+                
+            decrypted_secrets = []
+            for row in rows:
+                decrypted_val = vault.decrypt(row[1])
+                if decrypted_val:
+                    decrypted_secrets.append({
+                        "type": row[0],
+                        "value": decrypted_val,
+                        "location": row[2]
+                    })
+            return decrypted_secrets
+        except Exception as e:
+            logging.error(f"Failed to fetch secrets for service {web_service_id}: {e}")
+            return []
