@@ -5,6 +5,7 @@ import os
 import stat
 from typing import List, Tuple, Optional
 from contextlib import contextmanager
+from utsu.core.encryption import Vault
 
 class DeltaDB:
     def __init__(self, db_path: str = "data/utsu.db"):
@@ -89,18 +90,18 @@ class DeltaDB:
                     FOREIGN KEY(web_service_id) REFERENCES web_services(id)
                 )
             ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS leaked_secrets (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    web_service_id INTEGER,
-                    type TEXT NOT NULL,
-                    secret_value TEXT NOT NULL,
-                    location TEXT NOT NULL,
-                    discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(web_service_id, secret_value),
-                    FOREIGN KEY(web_service_id) REFERENCES web_services(id)
-                )
-            ''')
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS leaked_secrets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                web_service_id INTEGER,
+                type TEXT NOT NULL,
+                preview TEXT NOT NULL,
+                encrypted_value TEXT NOT NULL,
+                secret_hash TEXT NOT NULL UNIQUE,
+                location TEXT NOT NULL,
+                FOREIGN KEY(web_service_id) REFERENCES web_services(id)
+            )
+        """)
 
     def add_endpoint(self, web_service_id: int, path: str, source: str):
         with self._get_connection() as conn:
@@ -110,13 +111,43 @@ class DeltaDB:
                 VALUES (?, ?, ?)
             ''', (web_service_id, path, source))
 
-    def add_secret(self, web_service_id: int, secret_type: str, value: str, location: str):
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT OR IGNORE INTO leaked_secrets (web_service_id, type, secret_value, location)
-                VALUES (?, ?, ?, ?)
-            ''', (web_service_id, secret_type, value, location))
+    def add_secret(self, web_service_id: int, secret_type: str, value: str, location: str) -> bool:
+        """
+        Encrypts and stores a discovered secret. 
+        Returns True if newly inserted, False if it's a duplicate.
+        """
+        if not value:
+            return False
+
+        # Initialize the vault and encrypt the plaintext payload
+        vault = Vault()
+        encrypted_data = vault.encrypt(value)
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                # Insert the ciphertext and metadata, ignoring if the exact secret_hash already exists
+                cursor.execute("""
+                    INSERT INTO leaked_secrets 
+                    (web_service_id, type, preview, encrypted_value, secret_hash, location)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    web_service_id, 
+                    secret_type, 
+                    encrypted_data['preview'], 
+                    encrypted_data['ciphertext'], 
+                    encrypted_data['hash'], 
+                    location
+                ))
+                return True
+                
+        except sqlite3.IntegrityError:
+            # The UNIQUE constraint on secret_hash triggered, meaning we already have this exact credential.
+            logging.debug(f"Duplicate secret skipped for web_service_id {web_service_id}")
+            return False
+        except Exception as e:
+            logging.error(f"[-] Database error while saving encrypted secret: {e}")
+            return False
 
     def add_web_service(self, subdomain_id: int, url: str, status_code: int, content_length: int, title: str):
         with self._get_connection() as conn:

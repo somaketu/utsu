@@ -4,7 +4,7 @@ import socket
 import ipaddress
 import time
 import sys
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from threading import Semaphore
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Any
@@ -19,8 +19,8 @@ class LiveProber:
         self._rate_semaphore = Semaphore(self.rps)
         self._last_request_time = 0.0
         self.timeout = 7
+        self.max_redirects = 3 # Hard limit to prevent infinite loops
         
-        # Safely handle the Optional dictionary
         self.custom_headers: Dict[str, str] = custom_headers if custom_headers is not None else {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
@@ -34,62 +34,73 @@ class LiveProber:
             
             headers = self.custom_headers.copy()
             headers["Host"] = host_header
-            return requests.get(url, headers=headers, verify=False, timeout=self.timeout, allow_redirects=True)
+            # FATAL FLAW FIXED: We trap redirects manually instead of letting requests bypass validation
+            return requests.get(url, headers=headers, verify=False, timeout=self.timeout, allow_redirects=False)
 
     def _probe_single(self, subdomain_id: int, subdomain: str) -> Dict[str, Any]:
         for scheme in ["https", "http"]:
-            url = f"{scheme}://{subdomain}"
-            try:
-                hostname = urlparse(url).hostname
-                
-                # Guardrail: Prevent TypeError if urlparse fails on malformed input
-                if not hostname:
-                    log.debug(f"Could not parse valid hostname from URL: {url}")
-                    continue
+            current_url = f"{scheme}://{subdomain}"
+            redirects = 0
 
-                # This is the blocking DNS call causing the delay on dead domains
-                ip_str = socket.gethostbyname(hostname)
-                ip_obj = ipaddress.ip_address(ip_str)
-                
-                if not ip_obj.is_global:
-                    log.debug(f"Skipping local/private IP for {url}: {ip_str}")
-                    continue
-                
-                ip_url = url.replace(hostname, ip_str)
-                response = self._rate_limited_get(ip_url, host_header=hostname)
-                
-                title = ""
-                if "<title>" in response.text.lower():
-                    try:
-                        title_split = response.text.lower().split("<title>")
-                        if len(title_split) > 1:
-                            title = title_split[1].split("</title>")[0][:50]
-                    except Exception as e:
-                        log.debug(f"Failed to parse title on {url}: {str(e)}")
+            while redirects <= self.max_redirects:
+                try:
+                    hostname = urlparse(current_url).hostname
+                    
+                    if not hostname:
+                        log.debug(f"Could not parse valid hostname from URL: {current_url}")
+                        break # Break the redirect loop, try next scheme
 
-                return {
-                    "subdomain_id": subdomain_id,
-                    "url": url,
-                    "status_code": response.status_code,
-                    "content_length": len(response.content),
-                    "title": title.strip()
-                }
+                    # DNS resolution & SSRF check executed on EVERY hop
+                    ip_str = socket.gethostbyname(hostname)
+                    ip_obj = ipaddress.ip_address(ip_str)
+                    
+                    if not ip_obj.is_global:
+                        log.warning(f"[-] SSRF Blocked: Dropping request to unsafe host -> {current_url} ({ip_str})")
+                        break # Kill the request completely
+                    
+                    ip_url = current_url.replace(hostname, ip_str)
+                    response = self._rate_limited_get(ip_url, host_header=hostname)
+                    
+                    # Manual Redirect Interception
+                    if 300 <= response.status_code < 400 and 'Location' in response.headers:
+                        next_url = urljoin(current_url, response.headers['Location'])
+                        log.debug(f"[*] Validating and following redirect: {current_url} -> {next_url}")
+                        current_url = next_url
+                        redirects += 1
+                        continue # Re-run the loop to validate the next hop's IP
+                    
+                    title = ""
+                    if "<title>" in response.text.lower():
+                        try:
+                            title_split = response.text.lower().split("<title>")
+                            if len(title_split) > 1:
+                                title = title_split[1].split("</title>")[0][:50]
+                        except Exception as e:
+                            log.debug(f"Failed to parse title on {current_url}: {str(e)}")
 
-            except socket.gaierror:
-                log.debug(f"DNS resolution failed for {hostname if 'hostname' in locals() and hostname else url}")
-                continue
-            except requests.exceptions.Timeout:
-                log.debug(f"Connection timeout probing {url}")
-                continue
-            except requests.exceptions.RequestException as e:
-                log.debug(f"Request failed for {url}: {str(e)}")
-                continue
-            except ValueError as e:
-                log.debug(f"Value error probing {url}: {str(e)}")
-                continue
-            except Exception as e:
-                log.debug(f"Unexpected error probing {url}: {str(e)}", exc_info=True)
-                continue
+                    return {
+                        "subdomain_id": subdomain_id,
+                        "url": current_url, # Save the final URL, not just the starting one
+                        "status_code": response.status_code,
+                        "content_length": len(response.content),
+                        "title": title.strip()
+                    }
+
+                except socket.gaierror:
+                    log.debug(f"DNS resolution failed for {hostname if 'hostname' in locals() and hostname else current_url}")
+                    break
+                except requests.exceptions.Timeout:
+                    log.debug(f"Connection timeout probing {current_url}")
+                    break
+                except requests.exceptions.RequestException as e:
+                    log.debug(f"Request failed for {current_url}: {str(e)}")
+                    break
+                except ValueError as e:
+                    log.debug(f"Value error probing {current_url}: {str(e)}")
+                    break
+                except Exception as e:
+                    log.debug(f"Unexpected error probing {current_url}: {str(e)}", exc_info=True)
+                    break
         return {}
 
     def run(self, targets: Dict[int, str]) -> List[Dict[str, Any]]:

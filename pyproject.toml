@@ -18,7 +18,8 @@ dependencies = [
     "requests",
     "urllib3",
     "pyyaml",
-    "groq"
+    "groq",
+    "cryptography"
 ]
 
 [project.scripts]
