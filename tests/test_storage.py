@@ -45,6 +45,9 @@ def test_relational_data_insertion(tmp_path):
         cursor = conn.cursor()
         cursor.execute("INSERT INTO subdomains (domain_id, subdomain) VALUES (?, ?)", (domain_id, "api.hackerone.com"))
         subdomain_id = cursor.lastrowid
+        
+    # FIX FOR PYLANCE: Prove to the type checker that the insert succeeded and is an int
+    assert subdomain_id is not None
 
     # 2. Add the Web Service
     db.add_web_service(subdomain_id, "https://api.hackerone.com", 200, 1024, "API Root")
@@ -62,7 +65,11 @@ def test_relational_data_insertion(tmp_path):
         cursor.execute("SELECT path FROM endpoints WHERE web_service_id = ?", (ws_id,))
         assert cursor.fetchone()[0] == "/v1/graphql"
         
-        cursor.execute("SELECT type, secret_value FROM leaked_secrets WHERE web_service_id = ?", (ws_id,))
+        # FIX FOR CI/CD FATAL CRASH: Test the new encrypted schema
+        cursor.execute("SELECT type, encrypted_value FROM leaked_secrets WHERE web_service_id = ?", (ws_id,))
         secret_row = cursor.fetchone()
+        
+        assert secret_row is not None
         assert secret_row[0] == "HIGH_ENTROPY_TOKEN"
-        assert secret_row[1] == "sk_live_123456789"
+        assert secret_row[1] != "sk_live_123456789" # Mathematical proof the DB no longer holds plaintext
+        assert len(secret_row[1]) > 20 # Verify cipher payload exists

@@ -33,3 +33,9 @@ module-name = "utsu.utsu_rust_core"
 features = ["pyo3/extension-module", "pyo3/abi3"]
 # This ensures it doesn't try to link to the specific version of Python that built it
 compatibility = "off"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0"
+]

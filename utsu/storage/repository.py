@@ -13,28 +13,19 @@ class DeltaDB:
         self._init_db()
 
     def _ensure_secure_db(self):
-        """Forces strict 0600 OS-level permissions on the SQLite database."""
         db_dir = os.path.dirname(self.db_path)
-        
-        # Ensure the directory exists and restrict access to owner only (0700)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir, exist_ok=True)
             os.chmod(db_dir, stat.S_IRWXU)
             
-        # Create file if it doesn't exist to apply permissions before writing data
         if not os.path.exists(self.db_path):
             with open(self.db_path, 'a'): pass
             
-        # Explicitly restrict database file to owner read/write (0600)
         os.chmod(self.db_path, stat.S_IRUSR | stat.S_IWUSR)
         logging.debug(f"[*] Enforced strict 0600 permissions on database: {self.db_path}")
 
     @contextmanager
     def _get_connection(self) -> Iterator[sqlite3.Connection]:
-        """
-        Yields a safe, transactional database connection that automatically 
-        closes itself when the 'with' block exits, preventing locked DBs.
-        """
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         try:
             yield conn
@@ -89,6 +80,7 @@ class DeltaDB:
                     FOREIGN KEY(web_service_id) REFERENCES web_services(id)
                 )
             ''')
+            # ADDED: discovered_at to track when the secret was first introduced
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS leaked_secrets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,6 +90,7 @@ class DeltaDB:
                 encrypted_value TEXT NOT NULL,
                 secret_hash TEXT NOT NULL UNIQUE,
                 location TEXT NOT NULL,
+                discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(web_service_id) REFERENCES web_services(id)
             )
         """)
@@ -111,38 +104,22 @@ class DeltaDB:
             ''', (web_service_id, path, source))
 
     def add_secret(self, web_service_id: int, secret_type: str, value: str, location: str) -> bool:
-        """
-        Encrypts and stores a discovered secret. 
-        Returns True if newly inserted, False if it's a duplicate.
-        """
-        if not value:
-            return False
-
-        # Initialize the vault and encrypt the plaintext payload
+        if not value: return False
         vault = Vault()
         encrypted_data = vault.encrypt(value)
-
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                # Insert the ciphertext and metadata, ignoring if the exact secret_hash already exists
                 cursor.execute("""
                     INSERT INTO leaked_secrets 
                     (web_service_id, type, preview, encrypted_value, secret_hash, location)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (
-                    web_service_id, 
-                    secret_type, 
-                    encrypted_data['preview'], 
-                    encrypted_data['ciphertext'], 
-                    encrypted_data['hash'], 
-                    location
+                    web_service_id, secret_type, encrypted_data['preview'], 
+                    encrypted_data['ciphertext'], encrypted_data['hash'], location
                 ))
                 return True
-                
         except sqlite3.IntegrityError:
-            # The UNIQUE constraint on secret_hash triggered, meaning we already have this exact credential.
-            logging.debug(f"Duplicate secret skipped for web_service_id {web_service_id}")
             return False
         except Exception as e:
             logging.error(f"[-] Database error while saving encrypted secret: {e}")
@@ -176,38 +153,87 @@ class DeltaDB:
             cursor.execute('UPDATE subdomains SET is_scanned = 1 WHERE id = ?', (subdomain_id,))
 
     def get_endpoints_by_service(self, web_service_id: int) -> List[str]:
-        """Abstracts endpoint retrieval. Callers don't know this is SQLite."""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT path FROM endpoints WHERE web_service_id = ?", (web_service_id,))
                 return [row[0] for row in cursor.fetchall()]
         except Exception as e:
-            logging.error(f"Failed to fetch endpoints for service {web_service_id}: {e}")
             return []
 
     def get_encrypted_secrets_by_service(self, web_service_id: int) -> List[Dict[str, str]]:
-        """
-        Retrieves encrypted secrets and automatically decrypts them using the Vault,
-        returning a clean, uniform data structure to the application layer.
-        """
         try:
             vault = Vault()
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT type, encrypted_value, location FROM leaked_secrets WHERE web_service_id = ?", (web_service_id,))
                 rows = cursor.fetchall()
-                
             decrypted_secrets = []
             for row in rows:
                 decrypted_val = vault.decrypt(row[1])
                 if decrypted_val:
-                    decrypted_secrets.append({
-                        "type": row[0],
-                        "value": decrypted_val,
-                        "location": row[2]
-                    })
+                    decrypted_secrets.append({"type": row[0], "value": decrypted_val, "location": row[2]})
             return decrypted_secrets
         except Exception as e:
-            logging.error(f"Failed to fetch secrets for service {web_service_id}: {e}")
+            return []
+
+    # ==========================================
+    # PHASE 3: HISTORICAL DIFFING ABSTRACTIONS
+    # ==========================================
+
+    def get_new_subdomains(self, domain: str, since_utc: str) -> List[str]:
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT s.subdomain FROM subdomains s
+                    JOIN domains d ON s.domain_id = d.id
+                    WHERE d.domain = ? AND s.first_seen >= ?
+                ''', (domain, since_utc))
+                return [row[0] for row in cursor.fetchall()]
+        except Exception as e:
+            logging.error(f"Failed to fetch new subdomains: {e}")
+            return []
+
+    def get_new_endpoints(self, domain: str, since_utc: str) -> List[Dict[str, str]]:
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT w.url, e.path, e.source FROM endpoints e
+                    JOIN web_services w ON e.web_service_id = w.id
+                    JOIN subdomains s ON w.subdomain_id = s.id
+                    JOIN domains d ON s.domain_id = d.id
+                    WHERE d.domain = ? AND e.discovered_at >= ?
+                ''', (domain, since_utc))
+                return [{"url": row[0], "path": row[1], "source": row[2]} for row in cursor.fetchall()]
+        except Exception as e:
+            logging.error(f"Failed to fetch new endpoints: {e}")
+            return []
+
+    def get_new_secrets(self, domain: str, since_utc: str) -> List[Dict[str, str]]:
+        try:
+            vault = Vault()
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT w.url, ls.type, ls.encrypted_value, ls.location FROM leaked_secrets ls
+                    JOIN web_services w ON ls.web_service_id = w.id
+                    JOIN subdomains s ON w.subdomain_id = s.id
+                    JOIN domains d ON s.domain_id = d.id
+                    WHERE d.domain = ? AND ls.discovered_at >= ?
+                ''', (domain, since_utc))
+                rows = cursor.fetchall()
+            
+            new_secrets = []
+            for row in rows:
+                decrypted_val = vault.decrypt(row[2])
+                if decrypted_val:
+                    new_secrets.append({
+                        "url": row[0], "type": row[1],
+                        "value": decrypted_val, "location": row[3]
+                    })
+            return new_secrets
+        except Exception as e:
+            logging.error(f"Failed to fetch new secrets: {e}")
             return []

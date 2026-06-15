@@ -30,7 +30,7 @@ pip install --upgrade pip setuptools wheel maturin --quiet
 
 # 4. Production Compilation (Stable ABI target)
 echo "[*] Compiling high-speed Rust core (Release Mode)..."
-pip install . --no-cache-dir
+pip install -e .[dev] --no-cache-dir
 
 # 5. Global Command Wiring
 echo "[*] Wiring global command..."
