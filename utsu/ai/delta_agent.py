@@ -3,10 +3,14 @@ import json
 from typing import Dict, Any
 from groq import Groq
 from utsu.core.logger import log
+from utsu.core.config import ConfigManager
 
 class DeltaAgent:
-    def __init__(self, model_name: str = "llama-3.3-70b-versatile"):
-        self.model_name = model_name
+    def __init__(self):
+        # Dynamically pull the model from the active YAML profile configuration
+        cfg = ConfigManager()
+        self.model_name = getattr(cfg, "ai_model", None) or "llama-3.3-70b-versatile"
+        
         self.api_key = os.getenv("GROQ_API_KEY")
         if not self.api_key:
             log.error("[-] FATAL: GROQ_API_KEY environment variable is missing.")
@@ -46,7 +50,7 @@ Output strict JSON exactly matching this schema:
                 "executive_summary": "No net-new assets discovered. Threat landscape unchanged."
             }, indent=4)
 
-        log.info("[*] Dispatching delta payload to AI for threat modeling...")
+        log.info(f"[*] Dispatching delta payload to Groq ({self.model_name}) for threat modeling...")
 
         try:
             response = self.client.chat.completions.create(

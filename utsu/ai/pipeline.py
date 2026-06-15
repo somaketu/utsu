@@ -7,10 +7,12 @@ from utsu.core.config import ConfigManager
 from utsu.core.logger import log
 
 class TriageAgent:
-    def __init__(self, model_name: str = "llama-3.3-70b-versatile"):
-        self.model_name = model_name
-        self.api_key = os.getenv("GROQ_API_KEY")
+    def __init__(self):
         self.cfg = ConfigManager()
+        # Dynamically pull the model from the active YAML profile configuration
+        self.model_name = getattr(self.cfg, "ai_model", None) or "llama-3.3-70b-versatile"
+        
+        self.api_key = os.getenv("GROQ_API_KEY")
         self.db = DeltaDB(self.cfg.db_path)
         
         if not self.api_key:
