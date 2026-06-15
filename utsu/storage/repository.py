@@ -1,4 +1,5 @@
 import sqlite3
+from typing import Iterator
 import logging
 import os
 import stat
@@ -29,11 +30,18 @@ class DeltaDB:
         logging.debug(f"[*] Enforced strict 0600 permissions on database: {self.db_path}")
 
     @contextmanager
-    def _get_connection(self):
+    def _get_connection(self) -> Iterator[sqlite3.Connection]:
+        """
+        Yields a safe, transactional database connection that automatically 
+        closes itself when the 'with' block exits, preventing locked DBs.
+        """
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         try:
-            with conn:
-                yield conn
+            yield conn
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
         finally:
             conn.close()
 

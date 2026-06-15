@@ -1,5 +1,6 @@
 import sys
 from typing import Dict, List, Any
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from utsu.storage.repository import DeltaDB
 from utsu.core.logger import log
@@ -14,13 +15,30 @@ class DeepCrawler:
         self.db = db
         self.threads = threads
         self.max_depth = max_depth
+        
+        # The Gatekeeper: Do not waste DB rows or AI context on these
+        self.noise_extensions = (
+            '.css', '.png', '.jpg', '.jpeg', '.svg', '.gif', '.ico', 
+            '.woff', '.woff2', '.ttf', '.eot', '.mp4', '.webm', '.wav', 
+            '.mp3', '.pdf', '.zip', '.tar', '.gz', '.rar', '.7z'
+        )
+
+    def _is_viable_target(self, url: str) -> bool:
+        """Deterministic filter to drop static assets before they hit the AI."""
+        try:
+            parsed = urlparse(url)
+            path = parsed.path.lower()
+            if path.endswith(self.noise_extensions):
+                return False
+            return True
+        except Exception:
+            return False
 
     def _crawl_single(self, ws_id: int, url: str) -> Dict[str, Any]:
         if not utsu_rust_core:
             return {"ws_id": ws_id, "url": url, "error": "Rust core missing"}
         
         try:
-            # The Rust core releases the Python GIL during the network request
             results = utsu_rust_core.crawl_url(url, self.max_depth)
             results["ws_id"] = ws_id
             results["url"] = url
@@ -51,17 +69,20 @@ class DeepCrawler:
                     
                 ws_id = res["ws_id"]
                 
-                # Combine standard links and form endpoints into a unified attack surface mapping
-                endpoints = set(res.get("links", [])) | set(res.get("forms", []))
-                scripts = set(res.get("scripts", []))
+                raw_endpoints = set(res.get("links", [])) | set(res.get("forms", []))
+                raw_scripts = set(res.get("scripts", []))
                 
-                for ep in endpoints:
+                # Filter general links through the heuristic gatekeeper
+                viable_endpoints = {ep for ep in raw_endpoints if self._is_viable_target(ep)}
+                
+                # We strictly keep scripts because they contain API keys and routing logic
+                for ep in viable_endpoints:
                     self.db.add_endpoint(web_service_id=ws_id, path=ep, source="rust_crawler")
-                for script in scripts:
+                for script in raw_scripts:
                     self.db.add_endpoint(web_service_id=ws_id, path=script, source="rust_crawler_script")
                     
-                total_endpoints += len(endpoints) + len(scripts)
+                total_endpoints += len(viable_endpoints) + len(raw_scripts)
                 
-                sys.stdout.write(f"\r    ├── Crawl Progress: [{completed}/{total}] | Deep Endpoints Extracted: {total_endpoints}")
+                sys.stdout.write(f"\r    ├── Crawl Progress: [{completed}/{total}] | Viable Endpoints Extracted: {total_endpoints}")
                 sys.stdout.flush()
         print()
