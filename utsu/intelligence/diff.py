@@ -1,68 +1,42 @@
-from typing import Set, Dict, Any
-from utsu.core.logger import log
+import json
+from typing import Dict, Any
 from utsu.storage.repository import DeltaDB
+from utsu.core.logger import log
 
-class StateEngine:
-    def __init__(self, db: DeltaDB):
-        self.db = db
+class DiffEngine:
+    def __init__(self, db_path: str = "data/utsu.db"):
+        self.db = DeltaDB(db_path)
 
-    def process_subdomains(self, domain: str, current_subs: Set[str]) -> Dict[str, Any]:
+    def calculate_delta(self, domain: str, scan_start_utc: str) -> Dict[str, Any]:
         """
-        Calculates the delta between current recon and historical state.
-        Updates the database and returns only actionable, net-new targets.
+        Compares the current scan's findings against the historical baseline.
+        Returns a strictly structured JSON delta of net-new attack surface assets.
         """
-        # Ensure the root domain exists and get its ID
-        domain_id = self.db.add_domain(domain)
+        log.info(f"[*] Calculating attack surface delta for {domain} since {scan_start_utc}")
         
-        with self.db._get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Fetch historical subdomains
-            cursor.execute('SELECT subdomain FROM subdomains WHERE domain_id = ?', (domain_id,))
-            historical_subs = {row[0] for row in cursor.fetchall()}
-            
-            # The Diffing Logic
-            new_subs = current_subs - historical_subs
-            dead_subs = historical_subs - current_subs
-            unchanged_subs = current_subs.intersection(historical_subs)
-            
-            # 1. Insert new subdomains
-            if new_subs:
-                cursor.executemany(
-                    'INSERT INTO subdomains (domain_id, subdomain) VALUES (?, ?)',
-                    [(domain_id, sub) for sub in new_subs]
-                )
-            
-            # 2. Update 'last_seen' timestamp for existing subdomains
-            if unchanged_subs:
-                cursor.executemany(
-                    'UPDATE subdomains SET last_seen = CURRENT_TIMESTAMP WHERE domain_id = ? AND subdomain = ?',
-                    [(domain_id, sub) for sub in unchanged_subs]
-                )
-            
-            # 3. Retrieve the database IDs for the newly inserted subdomains in safe chunks
-            new_sub_ids = {}
-            if new_subs:
-                new_subs_list = list(new_subs)
-                chunk_size = 900  # Stays safely below SQLite's strict variable cap
-                
-                for i in range(0, len(new_subs_list), chunk_size):
-                    chunk = new_subs_list[i:i + chunk_size]
-                    placeholders = ','.join(['?'] * len(chunk))
-                    query = f"SELECT id, subdomain FROM subdomains WHERE domain_id = ? AND subdomain IN ({placeholders})"
-                    cursor.execute(query, [domain_id] + chunk)
-                    new_sub_ids.update({row[1]: row[0] for row in cursor.fetchall()})
-            
-        log.info(
-            f"[State Engine] Diff complete for {domain} | "
-            f"New: {len(new_subs)} | "
-            f"Dead: {len(dead_subs)} | "
-            f"Unchanged: {len(unchanged_subs)}"
-        )
-        
-        return {
-            "new_subs_list": new_subs,
-            "new_subs_map": new_sub_ids, 
-            "dead_subs": dead_subs,
-            "unchanged_subs": unchanged_subs
+        new_subdomains = self.db.get_new_subdomains(domain, scan_start_utc)
+        new_endpoints = self.db.get_new_endpoints(domain, scan_start_utc)
+        new_secrets = self.db.get_new_secrets(domain, scan_start_utc)
+
+        delta = {
+            "domain": domain,
+            "baseline_timestamp": scan_start_utc,
+            "summary": {
+                "new_subdomains_count": len(new_subdomains),
+                "new_endpoints_count": len(new_endpoints),
+                "new_secrets_count": len(new_secrets)
+            },
+            "net_new_assets": {
+                "subdomains": new_subdomains,
+                "endpoints": new_endpoints,
+                "secrets": new_secrets
+            }
         }
+        
+        total_new_assets = sum(delta["summary"].values())
+        if total_new_assets > 0:
+            log.info(f"[+] Diff Engine isolated {total_new_assets} net-new assets.")
+        else:
+            log.info("[-] No net-new assets discovered in this scan cycle.")
+            
+        return delta
