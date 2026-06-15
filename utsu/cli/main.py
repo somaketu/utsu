@@ -12,6 +12,7 @@ from utsu.plugins.subdomain.recon import ReconEngine
 from utsu.probing.client import LiveProber
 from utsu.plugins.js_analysis.analyzer import JSAnalyzer
 from utsu.plugins.crawling.crawler import DeepCrawler
+from utsu.plugins.vulnerability.scanner import NucleiEngine
 from utsu.core.reporting import ReportManager
 from utsu.intelligence.diff import DiffEngine
 from utsu.core.logger import log
@@ -132,6 +133,19 @@ def cmd_scan(args):
     diff_engine = DiffEngine(db_path=cfg.db_path)
     delta = diff_engine.calculate_delta(target_domain, scan_start_utc)
 
+    # ==========================================
+    # PHASE 7.5: TARGETED VULNERABILITY SCANNING
+    # ==========================================
+    log.info("Phase 7.5: Executing Stealth Vulnerability Scanning (Nuclei)...")
+    if live_urls:
+        nuclei_engine = NucleiEngine()
+        vulnerability_findings = nuclei_engine.scan(live_urls)
+        # Append findings directly into the state dictionary to pass to the Groq context window
+        delta["verified_vulnerabilities"] = vulnerability_findings
+    else:
+        log.info("[*] Zero net-new live services isolated in this cycle. Bypassing Nuclei.")
+        delta["verified_vulnerabilities"] = []
+
     log.info("Phase 8: Executing AI Threat Modeling on Delta...")
     delta_agent = DeltaAgent()
     threat_report = delta_agent.analyze(delta)
@@ -172,7 +186,6 @@ def cmd_triage(args):
 
     ws_id, exact_url = result[0], result[1]
     
-    # FIXED: Replaced marketing lies with factual architecture
     log.info(f"Initiating Cloud AI Triage (Groq 70B) for target: {exact_url}...")
     agent = TriageAgent()
     reporter = ReportManager()
@@ -217,7 +230,6 @@ def cmd_hunt(args):
     agent = TriageAgent()
     
     for index, (ws_id, exact_url) in enumerate(viable_targets, 1):
-        # FIXED: Replaced marketing lies with factual architecture
         log.info(f"[{index}/{len(viable_targets)}] Processing {exact_url} through Groq 70B engine...")
         try:
             report = agent.run(web_service_id=ws_id, url=exact_url, scope_rules=scope_rules)
