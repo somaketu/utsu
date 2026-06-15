@@ -2,15 +2,18 @@ import argparse
 import sys
 import os
 import time
+import sqlite3
+from datetime import datetime
 from utsu.storage.repository import DeltaDB
 from utsu.core.config import ConfigManager
 from utsu.ai.pipeline import TriageAgent
+from utsu.ai.delta_agent import DeltaAgent
 from utsu.plugins.subdomain.recon import ReconEngine
 from utsu.probing.client import LiveProber
 from utsu.plugins.js_analysis.analyzer import JSAnalyzer
 from utsu.plugins.crawling.crawler import DeepCrawler
 from utsu.core.reporting import ReportManager
-from utsu.intelligence.diff import StateEngine
+from utsu.intelligence.diff import DiffEngine
 from utsu.core.logger import log
 
 try:
@@ -33,6 +36,9 @@ def cmd_scan(args):
     cfg = ConfigManager()
     target_domain = args.target
 
+    # Capture the exact start time to calculate the Attack Surface Delta later
+    scan_start_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
     if args.force:
         log.info(f"--force flag detected. Wiping operational database at {cfg.db_path}...")
         if os.path.exists(cfg.db_path):
@@ -47,13 +53,24 @@ def cmd_scan(args):
     discovered_assets = engine.run_all()
     discovered_assets.add(target_domain)
 
-    log.info("Phase 2: Evaluating Deltas via State Engine...")
+    log.info("Phase 2: Syncing assets with local state repository...")
+    new_assets_to_probe = {}
+    domain_id = db.add_domain(target_domain)
     
-    state_engine = StateEngine(db)
-    state_data = state_engine.process_subdomains(target_domain, discovered_assets)
-    new_assets_to_probe = state_data["new_subs_map"]
-
+    # Safely ingest subdomains and extract only the net-new ones for probing
+    with db._get_connection() as conn:
+        cursor = conn.cursor()
+        for sub in discovered_assets:
+            try:
+                cursor.execute("INSERT INTO subdomains (domain_id, subdomain) VALUES (?, ?)", (domain_id, sub))
+                sub_id = cursor.lastrowid
+                new_assets_to_probe[sub_id] = sub
+            except sqlite3.IntegrityError:
+                pass # Asset already exists in historical state
+                
     log.info(f"Found {len(new_assets_to_probe)} net-new assets targeting execution queue.")
+    
+    live_urls = []
 
     if new_assets_to_probe:
         log.info("Phase 3: Launching Live Prober on Targets...")
@@ -61,7 +78,6 @@ def cmd_scan(args):
         live_services = prober.run(new_assets_to_probe)
 
         log.info("Phase 4: Committing verified web services to State Engine...")
-        live_urls = []
         crawler_targets = []
         
         for service in live_services:
@@ -100,19 +116,38 @@ def cmd_scan(args):
                 if intel["secrets"]:
                     log.warning(f"\n[!] CRITICAL: Found {len(intel['secrets'])} potential credentials on {target['url']}!")
                     for secret in intel["secrets"]:
+                        # Encrypted safely via the Vault under the hood
                         db.add_secret(web_service_id=target["ws_id"], secret_type=secret["type"], value=secret["value"], location=secret["location"])
                 
                 sys.stdout.write(f"\r    ├── Analysis Progress: [{completed}/{len(crawler_targets)}]")
                 sys.stdout.flush()
             print()
-            
-        reporter = ReportManager()
-        target_file = reporter.save_scan_targets(target_domain, live_urls)
-        
-        log.info(f"Processing complete. Attack surface data fully structured inside {cfg.db_path}")
-        log.info(f"Flat target list exported to: {target_file}")
     else:
         log.info("No new assets require probing or static code analysis.")
+
+    # ==========================================
+    # PHASE 3 ARCHITECTURE: INTELLIGENCE ENGINE
+    # ==========================================
+    log.info("Phase 7: Calculating Attack Surface Delta...")
+    diff_engine = DiffEngine(db_path=cfg.db_path)
+    delta = diff_engine.calculate_delta(target_domain, scan_start_utc)
+
+    log.info("Phase 8: Executing AI Threat Modeling on Delta...")
+    delta_agent = DeltaAgent()
+    threat_report = delta_agent.analyze(delta)
+    
+    print("\n" + "="*50)
+    print("      ATTACK SURFACE THREAT REPORT (GROQ 70B)      ")
+    print("="*50)
+    print(threat_report)
+    print("="*50 + "\n")
+
+    if live_urls:
+        reporter = ReportManager()
+        target_file = reporter.save_scan_targets(target_domain, live_urls)
+        log.info(f"Flat target list exported to: {target_file}")
+        
+    log.info(f"Processing complete. Attack surface data fully structured inside {cfg.db_path}")
 
 def cmd_triage(args):
     initialize_profile(args.profile)
@@ -137,7 +172,8 @@ def cmd_triage(args):
 
     ws_id, exact_url = result[0], result[1]
     
-    log.info(f"Initiating Local AI Triage for target: {exact_url}...")
+    # FIXED: Replaced marketing lies with factual architecture
+    log.info(f"Initiating Cloud AI Triage (Groq 70B) for target: {exact_url}...")
     agent = TriageAgent()
     reporter = ReportManager()
     
@@ -177,11 +213,12 @@ def cmd_hunt(args):
         log.info("No viable targets with extracted intelligence found for hunting.")
         return
 
-    log.info(f"Hunt Execution Started. {len(viable_targets)} viable targets in local AI queue.")
+    log.info(f"Hunt Execution Started. {len(viable_targets)} viable targets in AI queue.")
     agent = TriageAgent()
     
     for index, (ws_id, exact_url) in enumerate(viable_targets, 1):
-        log.info(f"[{index}/{len(viable_targets)}] Processing {exact_url} through local Ollama engine...")
+        # FIXED: Replaced marketing lies with factual architecture
+        log.info(f"[{index}/{len(viable_targets)}] Processing {exact_url} through Groq 70B engine...")
         try:
             report = agent.run(web_service_id=ws_id, url=exact_url, scope_rules=scope_rules)
             if report:
