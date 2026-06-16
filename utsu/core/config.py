@@ -1,7 +1,7 @@
 import os
 import logging
 import yaml
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Any
 
 class ConfigManager:
     _instance = None
@@ -15,10 +15,23 @@ class ConfigManager:
     def _load_defaults(self):
         self._load_env_file()
         self.db_path: str = os.getenv("DATABASE_PATH", "data/uro.db")
+        
+        # AI & Triage Configurations
+        self.ai_provider: str = os.getenv("AI_PROVIDER", "groq") # Default to cloud, can be 'ollama'
         self.ollama_url: str = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
         self.ai_model: str = os.getenv("DEFAULT_AI_MODEL", "llama3.2")
+        
+        # Network & Concurrency
         self.prober_threads: int = int(os.getenv("DEFAULT_PROBER_THREADS", "10"))
         self.rate_limit_rps: int = 10
+        
+        # Recon & Discovery Paths
+        self.wordlist_path: str = ""
+        self.resolvers_path: str = ""
+        
+        # Vulnerability Scanning Defaults
+        self.nuclei_templates: List[str] = ["cves/", "vulnerabilities/", "exposed-panels/", "misconfiguration/"]
+        
         self.scope_file: Optional[str] = None
         self.profile_name: str = "Default Profile"
         self.custom_headers: Dict[str, str] = {
@@ -41,22 +54,25 @@ class ConfigManager:
 
         try:
             with open(profile_path, 'r') as f:
-                config_data = yaml.safe_load(f) or {}
+                raw_data = yaml.safe_load(f)
                 
-                self.profile_name = config_data.get("name", "Unknown Target")
+                # Strict Type Enforcement: Block malformed YAML arrays
+                if not isinstance(raw_data, dict):
+                    logging.error(f"[-] Invalid YAML structure in {profile_path}. Expected a key-value dictionary.")
+                    return
+                    
+                config_data: Dict[str, Any] = raw_data
                 
-                # Sandbox the scope_file to prevent path traversal
+                self.profile_name = str(config_data.get("name", "Unknown Target"))
+                
                 # Sandbox the scope_file to prevent path traversal
                 raw_scope = config_data.get("scope_file")
-                if raw_scope:
-                    # Expand the ~ if it exists
+                if raw_scope and isinstance(raw_scope, str):
                     raw_scope = os.path.expanduser(raw_scope)
                     
                     if os.path.isabs(raw_scope):
-                        # If it's an absolute path (like /Users/aitoo/...), use it directly
                         self.scope_file = raw_scope
                     else:
-                        # If it's relative, resolve it against the profile directory
                         base_dir = os.path.dirname(os.path.abspath(profile_path))
                         resolved = os.path.realpath(os.path.join(base_dir, raw_scope))
                         if resolved.startswith(base_dir):
@@ -66,17 +82,27 @@ class ConfigManager:
                 
                 if "threads" in config_data:
                     self.prober_threads = int(config_data["threads"])
-                if "ai_model" in config_data:
-                    self.ai_model = str(config_data["ai_model"])
                 
                 # Parse network rate limits
                 network_rules = config_data.get("network_rules", {})
-                if "rate_limit_rps" in network_rules:
+                if isinstance(network_rules, dict) and "rate_limit_rps" in network_rules:
                     self.rate_limit_rps = int(network_rules["rate_limit_rps"])
                 
                 # Extract arbitrary compliance headers dynamically
-                if "custom_headers" in config_data and isinstance(config_data["custom_headers"], dict):
-                    self.custom_headers.update(config_data["custom_headers"])
+                custom_headers = config_data.get("custom_headers")
+                if isinstance(custom_headers, dict):
+                    self.custom_headers.update(custom_headers)
+                    
+                # ==========================================
+                # DYNAMIC INGESTION PROTOCOL
+                # ==========================================
+                ignore_keys = {"name", "scope_file", "threads", "network_rules", "custom_headers"}
+                for key, value in config_data.items():
+                    if key not in ignore_keys:
+                        # Ensures paths containing ~ are expanded dynamically (e.g., ~/wordlists/subs.txt)
+                        if isinstance(value, str) and value.startswith("~/"):
+                            value = os.path.expanduser(value)
+                        setattr(self, key, value)
                     
                 logging.info(f"[*] Activated operational profile: {self.profile_name}")
         except Exception as e:
