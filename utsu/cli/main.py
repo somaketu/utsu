@@ -102,27 +102,22 @@ def cmd_scan(args):
             crawler.run(crawler_targets)
 
             log.info("Phase 6: Executing Static Code Analysis (JS Secrets)...")
-            sys.stdout.write(f"[*] Parsing scripts across {len(crawler_targets)} targets...\n")
-            completed = 0
+            sys.stdout.write(f"[*] Concurrently parsing scripts across {len(crawler_targets)} targets...\n")
             
-            for target in crawler_targets:
-                completed += 1
-                analyzer = JSAnalyzer(target["url"], custom_headers=cfg.custom_headers)
-                intel = analyzer.analyze()
+            analyzer = JSAnalyzer(custom_headers=cfg.custom_headers, threads=cfg.prober_threads)
+            analysis_results = analyzer.run(crawler_targets)
 
+            for intel in analysis_results:
                 if intel["paths"]:
                     for path in intel["paths"]:
-                        db.add_endpoint(web_service_id=target["ws_id"], path=path, source="js_analyzer")
+                        db.add_endpoint(web_service_id=intel["ws_id"], path=path, source="js_analyzer")
 
                 if intel["secrets"]:
-                    log.warning(f"\n[!] CRITICAL: Found {len(intel['secrets'])} potential credentials on {target['url']}!")
+                    log.warning(f"\n[!] CRITICAL: Found {len(intel['secrets'])} potential credentials on {intel['url']}!")
                     for secret in intel["secrets"]:
-                        # Encrypted safely via the Vault under the hood
-                        db.add_secret(web_service_id=target["ws_id"], secret_type=secret["type"], value=secret["value"], location=secret["location"])
-                
-                sys.stdout.write(f"\r    ├── Analysis Progress: [{completed}/{len(crawler_targets)}]")
-                sys.stdout.flush()
-            print()
+                        db.add_secret(web_service_id=intel["ws_id"], secret_type=secret["type"], value=secret["value"], location=secret["location"])
+            
+            print(f"    ├── Analysis Complete: Processed {len(crawler_targets)} assets.")
     else:
         log.info("No new assets require probing or static code analysis.")
 
