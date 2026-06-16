@@ -25,22 +25,17 @@ class TokenBucket:
             now = time.monotonic()
             elapsed = now - self._last_refill
             
-            # Refill tokens based on elapsed time, capped at max RPS
             self._tokens = min(self._rps, self._tokens + elapsed * self._rps)
             self._last_refill = now
             
             if self._tokens >= 1.0:
                 self._tokens -= 1.0
-                return  # Fast path: Token acquired, no sleep needed
+                return
                 
-            # Calculate exact sleep required to generate 1 full token
             sleep_time = (1.0 - self._tokens) / self._rps
-            
-            # Pre-consume the token and advance the refill timer
             self._tokens = 0.0
             self._last_refill = now + sleep_time
             
-        # Sleep OUTSIDE the lock to prevent thread contention
         if sleep_time > 0:
             time.sleep(sleep_time)
 
@@ -57,67 +52,75 @@ class LiveProber:
         }
 
     def _rate_limited_get(self, url: str, host_header: str):
-        # Enforce strict cryptographic-grade pacing
         self.bucket.acquire()
-        
         headers = self.custom_headers.copy()
         headers["Host"] = host_header
         return requests.get(url, headers=headers, verify=False, timeout=self.timeout, allow_redirects=False)
 
-    def _probe_single(self, subdomain_id: int, subdomain: str) -> Dict[str, Any]:
-        for scheme in ["https", "http"]:
-            current_url = f"{scheme}://{subdomain}"
-            redirects = 0
+    def _probe_single(self, target: Dict[str, Any]) -> Dict[str, Any]:
+        subdomain_id = target["id"]
+        current_url = target["url"]
+        redirects = 0
 
-            while redirects <= self.max_redirects:
-                try:
-                    hostname = urlparse(current_url).hostname
-                    
-                    if not hostname:
-                        break
-
-                    ip_str = socket.gethostbyname(hostname)
-                    ip_obj = ipaddress.ip_address(ip_str)
-                    
-                    if not ip_obj.is_global:
-                        log.warning(f"[-] SSRF Blocked: Dropping request to unsafe host -> {current_url} ({ip_str})")
-                        break
-                    
-                    ip_url = current_url.replace(hostname, ip_str)
-                    response = self._rate_limited_get(ip_url, host_header=hostname)
-                    
-                    if 300 <= response.status_code < 400 and 'Location' in response.headers:
-                        current_url = urljoin(current_url, response.headers['Location'])
-                        redirects += 1
-                        continue
-                    
-                    title = ""
-                    if "<title>" in response.text.lower():
-                        try:
-                            title = response.text.lower().split("<title>")[1].split("</title>")[0][:50]
-                        except Exception: pass
-
-                    return {
-                        "subdomain_id": subdomain_id,
-                        "url": current_url,
-                        "status_code": response.status_code,
-                        "content_length": len(response.content),
-                        "title": title.strip()
-                    }
-
-                except Exception:
+        while redirects <= self.max_redirects:
+            try:
+                parsed = urlparse(current_url)
+                hostname = parsed.hostname
+                port = parsed.port
+                
+                if not hostname:
                     break
+
+                ip_str = socket.gethostbyname(hostname)
+                ip_obj = ipaddress.ip_address(ip_str)
+                
+                if not ip_obj.is_global:
+                    log.warning(f"[-] SSRF Blocked: Dropping request to unsafe host -> {current_url} ({ip_str})")
+                    break
+                
+                # Reconstruct netloc for the internal IP request, preserving custom ports
+                netloc = f"{ip_str}:{port}" if port else ip_str
+                ip_url = current_url.replace(parsed.netloc, netloc)
+                
+                # Standard HTTP requests require the port in the Host header if non-standard
+                host_header = f"{hostname}:{port}" if port else hostname
+                
+                response = self._rate_limited_get(ip_url, host_header=host_header)
+                
+                if 300 <= response.status_code < 400 and 'Location' in response.headers:
+                    current_url = urljoin(current_url, response.headers['Location'])
+                    redirects += 1
+                    continue
+                
+                title = ""
+                if "<title>" in response.text.lower():
+                    try:
+                        title = response.text.lower().split("<title>")[1].split("</title>")[0][:50]
+                    except Exception: pass
+
+                return {
+                    "subdomain_id": subdomain_id,
+                    "url": current_url,
+                    "status_code": response.status_code,
+                    "content_length": len(response.content),
+                    "title": title.strip()
+                }
+
+            except Exception as e:
+                # Silently catch timeouts/refusals as the port might be open but not speaking HTTP
+                break
+                
         return {}
 
-    def run(self, targets: Dict[int, str]) -> List[Dict[str, Any]]:
+    def run(self, targets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         live_services = []
         total = len(targets)
         completed = 0
         
-        sys.stdout.write(f"\r[*] Initializing concurrent probe across {total} targets...\n")
+        sys.stdout.write(f"\r[*] Initializing concurrent probe across {total} verified targets...\n")
         
         with ThreadPoolExecutor(max_workers=self.threads) as executor:
-            future_to_target = {executor.submit(self._probe_single, sub_id, sub): sub for sub_id, sub in targets.items()}
+            future_to_target = {executor.submit(self._probe_single, target): target for target in targets}
             
             for future in as_completed(future_to_target):
                 completed += 1

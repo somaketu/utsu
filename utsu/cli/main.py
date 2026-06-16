@@ -4,12 +4,16 @@ import os
 import time
 import sqlite3
 from datetime import datetime
+from urllib.parse import urlparse
+
 from utsu.storage.repository import DeltaDB
 from utsu.core.config import ConfigManager
 from utsu.ai.pipeline import TriageAgent
 from utsu.ai.delta_agent import DeltaAgent
 from utsu.plugins.subdomain.recon import ReconEngine
+from utsu.plugins.subdomain.active import ActiveReconEngine
 from utsu.probing.client import LiveProber
+from utsu.probing.portscan import PortScanner
 from utsu.plugins.js_analysis.analyzer import JSAnalyzer
 from utsu.plugins.crawling.crawler import DeepCrawler
 from utsu.plugins.vulnerability.scanner import NucleiEngine
@@ -37,6 +41,10 @@ def cmd_scan(args):
     cfg = ConfigManager()
     target_domain = args.target
 
+    # Extract dynamic configuration for Active tools from YAML
+    wordlist = getattr(cfg, 'wordlist_path', '')
+    resolvers = getattr(cfg, 'resolvers_path', '')
+
     # Capture the exact start time to calculate the Attack Surface Delta later
     scan_start_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -48,17 +56,30 @@ def cmd_scan(args):
     db = DeltaDB(cfg.db_path)
     
     log.info(f"Target: {target_domain}")
+    
+    # ==========================================
+    # PHASE 1: PASSIVE RECONNAISSANCE
+    # ==========================================
     log.info("Phase 1: Gathering passive intelligence...")
-
-    engine = ReconEngine(target_domain)
-    discovered_assets = engine.run_all()
+    recon_engine = ReconEngine(target_domain)
+    discovered_assets = recon_engine.run_all()
     discovered_assets.add(target_domain)
 
+    # ==========================================
+    # PHASE 1.5: ACTIVE DNS BRUTE-FORCING
+    # ==========================================
+    log.info("Phase 1.5: Executing Active DNS Brute-forcing...")
+    active_engine = ActiveReconEngine(target_domain, wordlist, resolvers)
+    active_assets = active_engine.bruteforce()
+    discovered_assets.update(active_assets)
+
+    # ==========================================
+    # PHASE 2: STATE SYNCHRONIZATION
+    # ==========================================
     log.info("Phase 2: Syncing assets with local state repository...")
     new_assets_to_probe = {}
     domain_id = db.add_domain(target_domain)
     
-    # Safely ingest subdomains and extract only the net-new ones for probing
     with db._get_connection() as conn:
         cursor = conn.cursor()
         for sub in discovered_assets:
@@ -67,75 +88,98 @@ def cmd_scan(args):
                 sub_id = cursor.lastrowid
                 new_assets_to_probe[sub_id] = sub
             except sqlite3.IntegrityError:
-                pass # Asset already exists in historical state
+                pass 
                 
-    log.info(f"Found {len(new_assets_to_probe)} net-new assets targeting execution queue.")
+    log.info(f"Found {len(new_assets_to_probe)} net-new hostnames targeting execution queue.")
     
     live_urls = []
 
     if new_assets_to_probe:
-        log.info("Phase 3: Launching Live Prober on Targets...")
-        prober = LiveProber(threads=cfg.prober_threads, rps=cfg.rate_limit_rps, custom_headers=cfg.custom_headers)
-        live_services = prober.run(new_assets_to_probe)
+       # ==========================================
+        # PHASE 2.5: HIGH-SPEED PORT SCANNING
+        # ==========================================
+        log.info("Phase 2.5: Executing High-Speed Port Scanning (Naabu)...")
+        hostnames = list(new_assets_to_probe.values())
+        port_scanner = PortScanner(threads=cfg.prober_threads)
+        discovered_naabu_urls = port_scanner.scan(hostnames)
 
-        log.info("Phase 4: Committing verified web services to State Engine...")
-        crawler_targets = []
+        # Use a list of dictionaries to prevent port overwriting on the same subdomain
+        sub_to_id = {v: k for k, v in new_assets_to_probe.items()}
+        prober_targets = []
         
-        for service in live_services:
-            live_urls.append(service["url"])
-            db.add_web_service(
-                subdomain_id=service["subdomain_id"],
-                url=service["url"],
-                status_code=service["status_code"],
-                content_length=service["content_length"],
-                title=service["title"]
-            )
+        for url in discovered_naabu_urls:
+            parsed = urlparse(url)
+            host = parsed.hostname
+            if host in sub_to_id:
+                prober_targets.append({
+                    "id": sub_to_id[host],
+                    "url": url
+                })
+
+        if prober_targets:
+            # ==========================================
+            # PHASE 3: LIVE PROBING
+            # ==========================================
+            log.info("Phase 3: Launching Live Prober on Targets...")
+            prober = LiveProber(threads=cfg.prober_threads, rps=cfg.rate_limit_rps, custom_headers=cfg.custom_headers)
+            live_services = prober.run(prober_targets)
+
+            log.info("Phase 4: Committing verified web services to State Engine...")
+            crawler_targets = []
             
-            service_id = db.get_web_service_id_by_url(service["url"])
-            if service_id:
-                crawler_targets.append({"ws_id": service_id, "url": service["url"]})
-                db.mark_scanned(service["subdomain_id"])
+            for service in live_services:
+                live_urls.append(service["url"])
+                db.add_web_service(
+                    subdomain_id=service["subdomain_id"],
+                    url=service["url"],
+                    status_code=service["status_code"],
+                    content_length=service["content_length"],
+                    title=service["title"]
+                )
+                
+                service_id = db.get_web_service_id_by_url(service["url"])
+                if service_id:
+                    crawler_targets.append({"ws_id": service_id, "url": service["url"]})
+                    db.mark_scanned(service["subdomain_id"])
 
-        if crawler_targets:
-            log.info("Phase 5: Engaging Rust Engine for Deep DOM Extraction...")
-            crawler = DeepCrawler(db, threads=cfg.prober_threads, max_depth=1)
-            crawler.run(crawler_targets)
+            if crawler_targets:
+                log.info("Phase 5: Engaging Rust Engine for Deep DOM Extraction...")
+                crawler = DeepCrawler(db, threads=cfg.prober_threads, max_depth=1)
+                crawler.run(crawler_targets)
 
-            log.info("Phase 6: Executing Static Code Analysis (JS Secrets)...")
-            sys.stdout.write(f"[*] Concurrently parsing scripts across {len(crawler_targets)} targets...\n")
-            
-            analyzer = JSAnalyzer(custom_headers=cfg.custom_headers, threads=cfg.prober_threads)
-            analysis_results = analyzer.run(crawler_targets)
+                log.info("Phase 6: Executing Static Code Analysis (JS Secrets)...")
+                sys.stdout.write(f"[*] Concurrently parsing scripts across {len(crawler_targets)} targets...\n")
+                
+                analyzer = JSAnalyzer(custom_headers=cfg.custom_headers, threads=cfg.prober_threads)
+                analysis_results = analyzer.run(crawler_targets)
 
-            for intel in analysis_results:
-                if intel["paths"]:
-                    for path in intel["paths"]:
-                        db.add_endpoint(web_service_id=intel["ws_id"], path=path, source="js_analyzer")
+                for intel in analysis_results:
+                    if intel["paths"]:
+                        for path in intel["paths"]:
+                            db.add_endpoint(web_service_id=intel["ws_id"], path=path, source="js_analyzer")
 
-                if intel["secrets"]:
-                    log.warning(f"\n[!] CRITICAL: Found {len(intel['secrets'])} potential credentials on {intel['url']}!")
-                    for secret in intel["secrets"]:
-                        db.add_secret(web_service_id=intel["ws_id"], secret_type=secret["type"], value=secret["value"], location=secret["location"])
-            
-            print(f"    ├── Analysis Complete: Processed {len(crawler_targets)} assets.")
+                    if intel["secrets"]:
+                        log.warning(f"\n[!] CRITICAL: Found {len(intel['secrets'])} potential credentials on {intel['url']}!")
+                        for secret in intel["secrets"]:
+                            db.add_secret(web_service_id=intel["ws_id"], secret_type=secret["type"], value=secret["value"], location=secret["location"])
+                
+                print(f"    ├── Analysis Complete: Processed {len(crawler_targets)} assets.")
+        else:
+            log.info("[-] Naabu found no open web ports on the net-new assets. Skipping probing.")
     else:
         log.info("No new assets require probing or static code analysis.")
 
     # ==========================================
-    # PHASE 3 ARCHITECTURE: INTELLIGENCE ENGINE
+    # PHASE 7 & 8: THREAT MODELING
     # ==========================================
     log.info("Phase 7: Calculating Attack Surface Delta...")
     diff_engine = DiffEngine(db_path=cfg.db_path)
     delta = diff_engine.calculate_delta(target_domain, scan_start_utc)
 
-    # ==========================================
-    # PHASE 7.5: TARGETED VULNERABILITY SCANNING
-    # ==========================================
     log.info("Phase 7.5: Executing Stealth Vulnerability Scanning (Nuclei)...")
     if live_urls:
         nuclei_engine = NucleiEngine()
         vulnerability_findings = nuclei_engine.scan(live_urls)
-        # Append findings directly into the state dictionary to pass to the Groq context window
         delta["verified_vulnerabilities"] = vulnerability_findings
     else:
         log.info("[*] Zero net-new live services isolated in this cycle. Bypassing Nuclei.")
