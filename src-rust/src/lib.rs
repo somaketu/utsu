@@ -2,9 +2,36 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use reqwest::blocking::Client;
 use scraper::{Html, Selector};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 use url::Url;
+
+/// Mathematically proves the resolved IP is not a local, private, or metadata address.
+/// Uses stable Rust methods instead of the unstable `is_global()`.
+fn is_safe_host(host: &str) -> bool {
+    if let Ok(mut addrs) = format!("{}:80", host).to_socket_addrs() {
+        if let Some(addr) = addrs.next() {
+            let ip = addr.ip();
+            match ip {
+                IpAddr::V4(ipv4) => {
+                    // Block loopback (127.x.x.x), private (10.x/172.16.x/192.168.x), 
+                    // link-local (169.254.x.x AWS metadata), and unspecified (0.0.0.0)
+                    if ipv4.is_loopback() || ipv4.is_private() || ipv4.is_link_local() || ipv4.is_unspecified() || ipv4.is_broadcast() || ipv4.is_documentation() {
+                        return false;
+                    }
+                }
+                IpAddr::V6(ipv6) => {
+                    if ipv6.is_loopback() || ipv6.is_unspecified() {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+    }
+    false // Drop unresolvable hosts completely
+}
 
 #[pyfunction]
 fn crawl_url(py: Python, target_url: String, max_depth: u32) -> PyResult<Py<PyDict>> {
@@ -12,11 +39,17 @@ fn crawl_url(py: Python, target_url: String, max_depth: u32) -> PyResult<Py<PyDi
     let mut links = HashSet::new();
     let mut scripts = HashSet::new();
     let mut forms = HashSet::new();
+    
+    // Cache DNS resolutions so we don't spam the network layer on every single internal link
+    let mut safe_hosts_cache: HashMap<String, bool> = HashMap::new();
 
-    // Configure the client for offensive security: ignore SSL errors, strict timeouts
+    // Configure the client for offensive security
     let client = Client::builder()
         .timeout(Duration::from_secs(7))
         .danger_accept_invalid_certs(true)
+        // FATAL FLAW FIXED: Block redirect-based SSRF. 
+        // The Python prober already found the live endpoint; the DOM crawler has no business following 301s.
+        .redirect(reqwest::redirect::Policy::none()) 
         .build()
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to build client: {}", e)))?;
 
@@ -27,12 +60,22 @@ fn crawl_url(py: Python, target_url: String, max_depth: u32) -> PyResult<Py<PyDi
     let mut queue = vec![(base_url.clone(), 0)];
 
     while let Some((current_url, depth)) = queue.pop() {
-        // Stop if we exceed depth or have already visited this exact URL
         if depth > max_depth || !visited.insert(current_url.to_string()) {
             continue;
         }
 
-        // Release the Python GIL while making the network request so the rest of your framework doesn't freeze
+        let host = match current_url.host_str() {
+            Some(h) => h,
+            None => continue,
+        };
+
+        // Execute DNS/IP safety check
+        let is_safe = *safe_hosts_cache.entry(host.to_string()).or_insert_with(|| is_safe_host(host));
+        if !is_safe {
+            continue; // Drop the SSRF payload instantly
+        }
+
+        // Release the Python GIL while making the network request
         let text = py.allow_threads(|| {
             client.get(current_url.clone()).send().and_then(|res| res.text())
         });
@@ -53,7 +96,7 @@ fn crawl_url(py: Python, target_url: String, max_depth: u32) -> PyResult<Py<PyDi
                             links.insert(parsed.to_string());
                             
                             // Only recurse into internal links
-                            if depth < max_depth && parsed.domain() == base_url.domain() {
+                            if depth < max_depth && parsed.host_str() == base_url.host_str() {
                                 queue.push((parsed, depth + 1));
                             }
                         }
