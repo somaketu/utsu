@@ -1,596 +1,213 @@
 <div align="center">
 
-# UTSU
+# UTSU (移ろい)
 
 ### Attack Surface Intelligence Platform
 
-Autonomous Reconnaissance • Asset Discovery • JavaScript Intelligence • AI-Assisted Vulnerability Analysis
+Autonomous Reconnaissance • State-Aware Discovery • JavaScript Intelligence • AI-Assisted Analysis
 
 ---
 
 <p align="center">
-
 <img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white">
-
 <img src="https://img.shields.io/badge/Rust-1.78+-CE422B?style=for-the-badge&logo=rust&logoColor=white">
-
 <img src="https://img.shields.io/badge/LangGraph-AI%20Orchestration-0F172A?style=for-the-badge">
-
-<img src="https://img.shields.io/badge/Ollama-Local%20LLM-111827?style=for-the-badge">
-
+<img src="https://img.shields.io/badge/Groq-Cloud%20LLM-F55036?style=for-the-badge">
 <img src="https://img.shields.io/badge/SQLite-Persistent%20Storage-003B57?style=for-the-badge">
-
 <img src="https://img.shields.io/badge/License-MIT-16A34A?style=for-the-badge">
-
 </p>
 
-### Continuous Discovery. Local Intelligence. Actionable Findings.
+### Continuous Discovery. High-Speed Intelligence. Actionable Findings.
 
-URO is a security-focused attack surface intelligence platform designed to continuously discover internet-facing assets, extract application intelligence, and prioritize attack opportunities using local AI-driven analysis.
+Attack surfaces change faster than security teams can track them. UTSU is an offensive security framework designed to discover those changes, explain their impact, and help operators focus on what matters next. 
 
-Built for penetration testers, red teams, security researchers, and enterprise security teams, URO consolidates reconnaissance, enrichment, analysis, and triage into a single automated workflow.
+Built for penetration testers, red teams, and security engineers, UTSU consolidates reconnaissance, enrichment, and Groq-powered AI analysis into a single automated workflow.
 
 </div>
 
 ---
 
-# Executive Summary
+## Why UTSU?
 
-Modern organizations operate increasingly complex external attack surfaces spanning cloud infrastructure, web applications, APIs, third-party integrations, and rapidly changing digital assets.
+Traditional reconnaissance workflows (e.g., BBOT, Amass) rely on fragmented tooling and stateless execution—they run massive sweeps to find assets at a single point in time, with no memory of what existed yesterday. 
 
-Traditional reconnaissance workflows often rely on fragmented tooling, inconsistent data storage, and manual analysis processes that struggle to scale across large environments.
+UTSU shifts the focus from raw discovery volume to **stateful context**:
 
-URO addresses these challenges through a unified intelligence pipeline that:
+| Feature | Traditional Frameworks | UTSU |
+| :--- | :--- | :--- |
+| **Primary Objective** | Maximum asset discovery | Differential change detection |
+| **State Retention** | Stateless (Run-and-forget) | Stateful (Persistent DeltaDB Tracking) |
+| **Analysis Model** | Manual log parsing / Grep | Automated Evidence-Based Analysis |
+| **Noise Profile** | High (Regenerates static data) | Low (Isolates net-new asset deltas) |
 
-- Continuously discovers external assets
-- Tracks attack surface drift over time
-- Identifies exposed application functionality
-- Extracts intelligence from JavaScript assets
-- Detects secrets and sensitive references
-- Generates contextual attack hypotheses using local AI reasoning
-- Maintains persistent historical visibility across engagements
-
-Unlike cloud-dependent platforms, URO is designed around a privacy-first architecture where all intelligence collection and AI processing can remain entirely on-premises.
+The goal of UTSU is not merely to find more assets, but to explicitly isolate what changed, analyze the resulting attack vectors, and minimize the time between asset exposure and remediation.
 
 ---
 
-# Platform Capabilities
+## Platform Architecture
 
-## Continuous Asset Discovery
+UTSU follows a modular intelligence lifecycle. Execution is split across three specialized layers to balance high-throughput native processing with flexible AI orchestration.
 
-Perform passive reconnaissance against target domains and maintain a historical inventory of discovered assets.
-
-## Delta-Based Intelligence
-
-Identify newly exposed assets between scans and focus analysis on meaningful environmental changes rather than repeatedly processing known infrastructure.
-
-## Live Service Profiling
-
-Validate discovered assets through HTTP/S probing and collect actionable metadata including:
-
-- Status codes
-- Response titles
-- Content length
-- Redirect chains
-- Service fingerprints
-
-## JavaScript Intelligence Engine
-
-Leverage a native Rust-powered analysis engine capable of extracting:
-
-- API endpoints
-- Application routes
-- Authentication flows
-- Cloud service references
-- Embedded secrets
-- Access tokens
-- Configuration artifacts
-
-## AI-Assisted Investigation
-
-Generate contextual attack hypotheses and vulnerability assessments through a LangGraph workflow powered by local Ollama-hosted models.
-
-## Privacy-First Architecture
-
-Maintain complete ownership of reconnaissance data without transmitting assets, secrets, or findings to external AI providers.
-
----
-
-# Feature Matrix
-
-| Capability | Description |
-|------------|-------------|
-| Asset Discovery | Passive subdomain enumeration |
-| Change Tracking | Delta-aware attack surface monitoring |
-| Service Validation | HTTP/S probing and metadata collection |
-| JavaScript Intelligence | Endpoint, route and secret extraction |
-| Local AI Analysis | Ollama-powered triage workflows |
-| Persistent Storage | SQLite intelligence repository |
-| Scope Enforcement | Profile-driven engagement controls |
-| Offline Operation | No cloud dependency required |
-| Native Performance | Rust-powered analysis engine |
-| Historical Visibility | Long-term asset tracking |
-
----
-
-# Reference Architecture
-
-URO follows a modular intelligence lifecycle where each processing stage enriches previously collected data and persists findings into a centralized intelligence repository.
+* **The Orchestrator (Python):** Manages local state persistence, profile ingestion, concurrency loops, and external tool integration.
+* **The Engine (Rust/PyO3):** A multithreaded, memory-safe native core compiled to handle heavy DOM extraction and JavaScript intelligence parsing at hardware speeds.
+* **The Brain (AI Layer):** An abstraction layer utilizing LangGraph and the Groq API (Llama 3 70B) to translate raw structural changes into contextual attack hypotheses at near-instant speeds.
 
 ```mermaid
 flowchart TD
 
-    subgraph CLI["URO Command Interface"]
-
-        SCAN["uro scan"]
-        TRIAGE["uro triage"]
-        HUNT["uro hunt"]
-
+    subgraph CLI["Command Interface"]
+        SCAN["utsu scan"]
+        TRIAGE["utsu triage"]
+        HUNT["utsu hunt"]
     end
 
     subgraph CONFIG["Configuration & Persistence"]
-
-        ENV["Environment Configuration"]
+        ENV["Environment Variables"]
         PROFILE["YAML Profiles"]
-        RULES["Scope Rules"]
-        DB["SQLite Intelligence Store"]
-
+        DB["SQLite DeltaDB"]
     end
 
-    subgraph RECON["Phase 1 — Asset Discovery"]
-
+    subgraph RECON["Phase 1 — Discovery & Change"]
         DISCOVER["Passive Reconnaissance"]
-        SUBS["Discovered Assets"]
-
-    end
-
-    subgraph DELTA["Phase 2 — Change Analysis"]
-
         COMPARE["Delta Evaluation"]
-        NEW["New Asset Queue"]
-
+        NEW["Net-New Asset Queue"]
     end
 
-    subgraph PROBE["Phase 3 — Service Validation"]
-
+    subgraph EXTRACT["Phase 2 — Extraction (Rust Engine)"]
         LIVE["HTTP/S Probing"]
-        META["Metadata Collection"]
-
-    end
-
-    subgraph ANALYSIS["Phase 4 — Intelligence Extraction"]
-
         JS["JavaScript Analysis"]
-        RUST["Rust Processing Engine"]
         ROUTES["Endpoint Discovery"]
         SECRETS["Secret Detection"]
-
     end
 
-    subgraph AI["AI Intelligence Layer"]
-
+    subgraph AI["Phase 3 — AI Intelligence Layer"]
         GRAPH["LangGraph Workflow"]
-        OLLAMA["Local LLM"]
+        GROQ["Groq API (Llama 3)"]
         REPORT["Attack Surface Assessment"]
-
     end
 
     SCAN --> DISCOVER
-    DISCOVER --> SUBS
-    SUBS --> COMPARE
+    DISCOVER --> COMPARE
     COMPARE --> NEW
     NEW --> LIVE
-    LIVE --> META
-    META --> JS
-    JS --> RUST
-    RUST --> ROUTES
-    RUST --> SECRETS
+    LIVE --> JS
+    JS --> ROUTES
+    JS --> SECRETS
 
     ROUTES --> DB
     SECRETS --> DB
-    META --> DB
 
     TRIAGE --> GRAPH
     HUNT --> GRAPH
-
     DB --> GRAPH
-    RULES --> GRAPH
-    GRAPH --> OLLAMA
-    OLLAMA --> REPORT
+    
+    GRAPH --> GROQ
+    GROQ --> REPORT
 
     ENV --> PROFILE
-    PROFILE --> RULES
-
 ```
 
 ---
 
-# Core Design Principles
+## Core Capabilities
 
-## Persistent Intelligence
-
-URO is built around persistent intelligence rather than disposable scan results.
-
-Every discovered asset is tracked historically, enabling operators to identify infrastructure drift and newly exposed attack surface components.
-
----
-
-## Delta-Driven Processing
-
-Repeated scans avoid unnecessary analysis by processing only newly discovered assets.
-
-This significantly reduces execution time while increasing operational efficiency.
+* **Persistent Delta Engine:** Backed by SQLite, UTSU calculates the absolute structural delta between historical campaigns and active runs, filtering out persistent infrastructure noise so you can isolate net-new endpoints instantly.
+* **Operational Safety Controls:** Features modular request pacing, configurable connection timeouts, and adaptive scanning controls (including custom header injection for edge security bypass) that respect target infrastructure boundaries.
+* **JavaScript Intelligence Engine:** Leverages a native Rust backend to tear down SPAs and extract API endpoints, application routes, authentication flows, and hardcoded access tokens.
+* **OPSEC-Aware AI Pipeline:** Data security is built directly into the inference pipeline. UTSU includes a local parsing layer that sanitizes, redacts, or masks sensitive infrastructure details before sending payloads to the Groq inference backend.
 
 ---
 
-## Native Performance
+## Getting Started
 
-JavaScript analysis represents one of the most computationally intensive stages of reconnaissance.
-
-URO leverages Rust through PyO3 bindings to provide high-performance parsing and extraction capabilities while maintaining Python's orchestration flexibility.
-
----
-
-## Local AI Processing
-
-All AI workflows can execute locally through Ollama-hosted language models.
-
-Sensitive reconnaissance data never leaves the operator's environment.
-
----
-
-## Scope-Aware Analysis
-
-Engagement profiles and scope rules are integrated directly into the AI workflow, ensuring generated findings remain aligned with authorized testing boundaries.
-
----
-
-# Technology Stack
-
-| Layer | Technology |
-|---------|-----------|
-| Orchestration | Python 3.11+ |
-| Performance Engine | Rust 1.78+ |
-| Native Bindings | PyO3 |
-| Build System | Maturin |
-| AI Framework | LangGraph |
-| Agent Runtime | LangChain Core |
-| Local LLM | Ollama |
-| Validation | Pydantic v2 |
-| Persistence | SQLite |
-| Configuration | YAML + .env |
-
----
-
-# Project Structure
-
-```text
-uro/
-│
-├── .env.example
-├── pyproject.toml
-├── Makefile
-│
-├── src-rust/
-│   ├── Cargo.toml
-│   └── src/
-│       └── lib.rs
-│
-├── profiles/
-│
-├── data/
-│
-└── uro/
-    ├── cli/
-    ├── core/
-    ├── storage/
-    ├── probing/
-    ├── plugins/
-    │   ├── subdomain/
-    │   └── js_analysis/
-    ├── ai/
-    └── __init__.py
-```
-
----
-
-# Getting Started
-
-## Prerequisites
+### Prerequisites
 
 | Requirement | Description |
 |------------|-------------|
-| Python 3.11+ | Runtime Environment |
-| Rust & Cargo | Native Extension Compilation |
-| Ollama | Local AI Backend |
+| Python 3.11+ | Orchestration Runtime |
+| Rust 1.78+ & Cargo | Native Extension Compilation |
+| Groq API Key | High-Speed LLM Inference |
 
----
+### Installation
 
-## Install Ollama
-
-```bash
-ollama pull llama3.2
-```
-
-Verify installation:
+Clone the repository and run the automated installer to provision the virtual environment and compile the Rust native bindings seamlessly:
 
 ```bash
-ollama list
-```
+git clone https://github.com/somaketu/utsu.git
+cd utsu
 
----
+# Run the automated build and environment setup script
+./install.sh
 
-## Installation
-
-### Clone Repository
-
-```bash
-git clone https://github.com/Atsukiiii01/uro.git
-
-cd uro
-```
-
-### Create Virtual Environment
-
-```bash
-python -m venv venv
-
+# Activate the environment
 source venv/bin/activate
 
-# Windows
-
-venv\Scripts\activate
-```
-
-### Configure Environment
-
-```bash
+# Configure environment variables
 cp .env.example .env
 ```
 
-### Install Dependencies
-
-```bash
-PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 \
-pip install -e ".[ai,dev]"
-```
-
-### Verify Installation
-
-```bash
-uro --help
-```
-
----
-
-# Configuration
-
-## Global Configuration
-
-The `.env` file controls platform-wide behavior.
-
+Add your Groq API key to the `.env` file:
 ```ini
+GROQ_API_KEY=gsk_your_api_key_here
+DEFAULT_AI_MODEL=llama-3.3-70b-versatile
 DATABASE_PATH=data/uro.db
-
-OLLAMA_BASE_URL=http://127.0.0.1:11434
-
-DEFAULT_AI_MODEL=llama3.2
-
-DEFAULT_PROBER_THREADS=10
 ```
 
----
-
-## Engagement Profiles
-
-Profiles define target-specific execution parameters.
-
-```yaml
-name: Example Program
-
-target: example.com
-
-scope_file: scope.txt
-
-threads: 15
-```
-
----
-
-# Operational Workflow
-
-## Phase 1 — Discovery
-
-Discover assets and enrich intelligence.
-
+Verify the installation:
 ```bash
-uro scan example.com \
--p profiles/example.yaml
+utsu --help
 ```
-
-Capabilities:
-
-- Subdomain Enumeration
-- Asset Collection
-- Delta Evaluation
-- Service Validation
-- JavaScript Analysis
-- Intelligence Persistence
 
 ---
 
-## Phase 2 — Investigation
+## Operational Workflow
 
-Analyze a specific target through the AI triage pipeline.
+UTSU operations are governed completely by YAML runtime profiles (`profiles/example.yaml`), ensuring strict scope adherence and configurable state management.
 
+### Phase 1 — Discovery (State Scan)
+Scan an administrative boundary, automatically matching results against the historical baseline in DeltaDB:
 ```bash
-uro triage \
-checkout.example.com \
--p profiles/example.yaml
+utsu scan example.com -p profiles/example.yaml
 ```
 
-Capabilities:
+*To bypass historical diffs and force a complete database wipe/re-index, append the `--force` flag.*
 
-- Endpoint Analysis
-- Secret Correlation
-- Attack Path Generation
-- Finding Prioritization
-
----
-
-## Phase 3 — Hunt Mode
-
-Analyze all high-value assets discovered during reconnaissance.
-
+### Phase 2 — Investigation (Triage Mode)
+Analyze a specific target through the Groq AI pipeline to generate vulnerability hypotheses:
 ```bash
-uro hunt \
--p profiles/example.yaml
+utsu triage api.example.com -p profiles/example.yaml
 ```
 
-Capabilities:
-
-- Bulk Triage
-- Automated Prioritization
-- Vulnerability Hypothesis Generation
-- Attack Surface Ranking
-
----
-
-# Example Workflow
-
+### Phase 3 — Hunt Mode
+Execute bulk triage and automated prioritization across all high-value assets discovered during reconnaissance:
 ```bash
-# Discover assets
-
-uro scan example.com \
--p profiles/example.yaml
-
-# Investigate a target
-
-uro triage api.example.com \
--p profiles/example.yaml
-
-# Hunt across all candidates
-
-uro hunt \
--p profiles/example.yaml
+utsu hunt -p profiles/example.yaml
 ```
 
 ---
 
-# Development
+## Security Considerations & OPSEC
 
-## Rebuild Native Extension
-
-```bash
-PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 \
-maturin develop --release
-```
-
----
-
-## Python Quality Controls
-
-```bash
-ruff check .
-
-ruff format .
-```
-
----
-
-## Rust Quality Controls
-
-```bash
-cargo fmt
-
-cargo clippy
-```
-
----
-
-# Security Considerations
-
-## Authorized Use
-
-URO is intended exclusively for:
-
-- Authorized penetration testing
-- Security research
-- Internal security assessments
-- Approved vulnerability disclosure programs
-
-Operators are responsible for ensuring all activities comply with applicable laws, contractual obligations, and program rules.
-
----
-
-## Data Protection
-
-When deployed with the default Ollama backend, all intelligence processing remains within the operator's environment.
-
-Reconnaissance data, extracted secrets, discovered endpoints, and generated findings are never transmitted to third-party AI providers.
-
----
-
-## Network Safety Controls
-
-The probing subsystem incorporates safeguards designed to prevent interaction with:
-
-- Localhost Interfaces
-- RFC1918 Private Networks
-- Cloud Metadata Services
-- DNS-Rebinding Targets
-
-Examples include:
-
-```text
-127.0.0.1
-10.0.0.0/8
-172.16.0.0/12
-192.168.0.0/16
-169.254.169.254
-```
-
----
-
-# Roadmap
-
-### Planned Enhancements
-
-- Distributed Recon Workers
-- Cloud Asset Enumeration
-- Visual Attack Surface Mapping
-- Asset Risk Scoring
-- Multi-LLM Support
-- Headless Browser Analysis
-- API Schema Discovery
-- Continuous Monitoring Mode
-
----
-
-# Why URO?
-
-Modern attack surfaces evolve continuously.
-
-Security teams require more than one-time reconnaissance snapshots. They require persistent visibility, historical context, and actionable intelligence.
-
-URO combines automated discovery, high-performance analysis, and local AI-assisted reasoning into a unified attack surface intelligence platform capable of transforming raw reconnaissance data into meaningful security insights.
-
----
-
-# License
-
-Licensed under the MIT License.
-
-See the LICENSE file for additional information.
-
----
+### Network Safety Controls
+The probing subsystem incorporates hardcoded safeguards designed to prevent Server-Side Request Forgery (SSRF) and accidental interaction with internal infrastructure:
+* Drops routing to Localhost Interfaces (`127.0.0.1`)
+* Drops routing to RFC1918 Private Networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
+* Blocks Cloud Metadata Service resolution (`169.254.169.254`)
 
 ### Responsible Disclosure
+UTSU is a security research platform. Always obtain explicit authorization before conducting testing activities against systems, applications, or infrastructure you do not own. Unauthorized testing may violate laws, contractual agreements, or program policies.
 
-URO is a security research platform.
+---
 
-Always obtain explicit authorization before conducting testing activities against systems, applications, or infrastructure you do not own.
+## Roadmap
 
-Unauthorized testing may violate laws, contractual agreements, or program policies.
+* **Adaptive Scan Engine:** Dynamic adjustment of scanning speed based on target latency and edge response behavior.
+* **Asset Diff Engine:** Deep inline code and parameter diffs for tracked JavaScript files between scan cycles.
+* **Visual Attack Surface Mapping:** Graph-based mapping linking net-new subdomains to potential exploitation vectors.
+* **Continuous Monitoring Mode:** Daemonized background execution for real-time drift detection.
 
-```
+---
+
+## License
+
+Licensed under the MIT License. See the `LICENSE` file for additional information.
