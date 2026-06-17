@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from utsu.storage.repository import DeltaDB
 from utsu.core.logger import log
+from utsu.core.config import ConfigManager
 
 try:
     from utsu import utsu_rust_core  # type: ignore
@@ -13,8 +14,12 @@ except ImportError:
 class DeepCrawler:
     def __init__(self, db: DeltaDB, threads: int = 10, max_depth: int = 1):
         self.db = db
+        # Instantiate globally for the class ONCE to preserve thread performance
+        self.cfg = ConfigManager()  
         self.threads = threads
-        self.max_depth = max_depth
+        
+        # Override depth dynamically if defined in the active profile, else fallback to default
+        self.max_depth = getattr(self.cfg, "crawl_depth", max_depth)
         
         # The Gatekeeper: Do not waste DB rows or AI context on these
         self.noise_extensions = (
@@ -39,10 +44,25 @@ class DeepCrawler:
             return {"ws_id": ws_id, "url": url, "error": "Rust core missing"}
         
         try:
-            results = utsu_rust_core.crawl_url(url, self.max_depth)
-            results["ws_id"] = ws_id
-            results["url"] = url
-            return results
+            # 1. Extract raw headers
+            raw_headers = getattr(self.cfg, "custom_headers", None)
+            
+            # 2. Bulletproof Type Sanitizer: Rust strictly expects a List of Strings
+            custom_headers = None
+            if isinstance(raw_headers, dict):
+                custom_headers = [f"{k}: {v}" for k, v in raw_headers.items()]
+            elif isinstance(raw_headers, list):
+                custom_headers = [str(h) for h in raw_headers]
+            
+            # 3. Pass the sanitized state to the Rust engine
+            result = utsu_rust_core.crawl_url(url, self.max_depth, custom_headers)
+            
+            # 4. Append context to the returned dictionary
+            result["ws_id"] = ws_id
+            result["url"] = url
+            
+            return result
+            
         except Exception as e:
             return {"ws_id": ws_id, "url": url, "error": str(e)}
 
